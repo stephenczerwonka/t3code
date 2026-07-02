@@ -29,7 +29,11 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { makeDevinAcpRuntime, resolveDevinAcpBaseModelId } from "../acp/DevinAcpSupport.ts";
+import {
+  hasDevinCredentials,
+  makeDevinAcpRuntime,
+  resolveDevinAcpBaseModelId,
+} from "../acp/DevinAcpSupport.ts";
 
 const DEVIN_PRESENTATION = {
   displayName: "Devin",
@@ -249,6 +253,27 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
         status: "error",
         auth: { status: "unknown" },
         message: "Devin CLI is installed but failed to run.",
+      },
+    });
+  }
+
+  // Devin's ACP server never reads local CLI credentials — without an API
+  // key the authenticate call would start a PKCE browser login, which must
+  // not happen from a background status probe. Skip discovery and surface
+  // the auth gap instead.
+  if (!hasDevinCredentials(devinSettings, environment)) {
+    return buildServerProvider({
+      presentation: DEVIN_PRESENTATION,
+      enabled: devinSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "warning",
+        auth: { status: "unauthenticated" },
+        message:
+          "Devin CLI is installed, but no API key is configured. Set one in provider settings or export WINDSURF_API_KEY.",
       },
     });
   }

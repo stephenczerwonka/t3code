@@ -45,6 +45,13 @@ export function buildDevinAcpSpawnInput(
  * variable. When neither is present the plain authenticate call starts
  * Devin's PKCE browser login flow.
  */
+export function hasDevinCredentials(
+  devinSettings: Pick<DevinSettings, "apiKey"> | null | undefined,
+  environment: NodeJS.ProcessEnv | undefined,
+): boolean {
+  return Boolean(devinSettings?.apiKey?.trim() || environment?.[DEVIN_API_KEY_ENV]?.trim());
+}
+
 function resolveDevinAuthenticateMeta(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,
   environment: NodeJS.ProcessEnv | undefined,
