@@ -68,11 +68,15 @@ export const makeDevinAcpRuntime = (
   Scope.Scope
 > =>
   Effect.gen(function* () {
-    const authenticateMeta = resolveDevinAuthenticateMeta(input.devinSettings, input.environment);
+    // Default to the server's environment so an omitted `environment` still
+    // inherits PATH (binary resolution) and WINDSURF_API_KEY (credentials)
+    // instead of spawning the child with an empty env.
+    const environment = input.environment ?? process.env;
+    const authenticateMeta = resolveDevinAuthenticateMeta(input.devinSettings, environment);
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, input.environment),
+        spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, environment),
         authMethodId: DEVIN_AUTH_METHOD_API_KEY,
         ...(authenticateMeta ? { authenticateMeta } : {}),
       }).pipe(
