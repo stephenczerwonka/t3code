@@ -101,18 +101,36 @@ export function currentDevinModelIdFromSessionSetup(
   return sessionSetupResult.models?.currentModelId?.trim() || undefined;
 }
 
+const JSON_RPC_METHOD_NOT_FOUND = -32601;
+
+function isMethodNotFound(cause: EffectAcpErrors.AcpError): boolean {
+  return cause._tag === "AcpRequestError" && cause.code === JSON_RPC_METHOD_NOT_FOUND;
+}
+
 export function applyDevinAcpModelSelection<E>(input: {
   readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setSessionModel">;
   readonly currentModelId: string | undefined;
   readonly requestedModelId: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
+  // Devin's ACP server does not implement the unstable `session/set_model`
+  // capability and reports no session model state — model routing happens
+  // server-side (Adaptive). Only attempt a switch when the agent reported a
+  // current model, i.e. it actually negotiated model support.
   const shouldSwitchModel =
-    input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
+    input.currentModelId !== undefined &&
+    input.requestedModelId !== undefined &&
+    input.requestedModelId !== input.currentModelId;
   if (!shouldSwitchModel) {
     return Effect.succeed(input.currentModelId);
   }
-  return input.runtime
-    .setSessionModel(input.requestedModelId)
-    .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
+  return input.runtime.setSessionModel(input.requestedModelId).pipe(
+    Effect.as<string | undefined>(input.requestedModelId),
+    Effect.catchIf(isMethodNotFound, () =>
+      Effect.logDebug("Devin ACP does not support session/set_model; keeping agent default.").pipe(
+        Effect.as(input.currentModelId),
+      ),
+    ),
+    Effect.mapError(input.mapError),
+  );
 }
