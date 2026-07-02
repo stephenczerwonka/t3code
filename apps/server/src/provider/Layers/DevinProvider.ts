@@ -7,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -287,6 +288,9 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
     yield* Effect.logWarning("Devin ACP model discovery failed", {
       errorTag: causeErrorTag(discoveryExit.cause),
     });
+    const authRejected = /invalid api key|authentication (failed|required)/i.test(
+      Cause.pretty(discoveryExit.cause),
+    );
     return buildServerProvider({
       presentation: DEVIN_PRESENTATION,
       enabled: devinSettings.enabled,
@@ -295,9 +299,11 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
       probe: {
         installed: true,
         version,
-        status: "error",
-        auth: { status: "unknown" },
-        message: "Devin CLI is installed but ACP startup failed. Check server logs for details.",
+        status: authRejected ? "warning" : "error",
+        auth: { status: authRejected ? "unauthenticated" : "unknown" },
+        message: authRejected
+          ? "Devin rejected the configured API key. Clear it in provider settings to use the browser login flow instead."
+          : "Devin CLI is installed but ACP startup failed. Check server logs for details.",
       },
     });
   }
