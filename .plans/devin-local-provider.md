@@ -24,7 +24,20 @@ No pushes to the upstream repo — this is a personal local build.
 - `pnpm typecheck`: **14/15 packages pass** (web, contracts, effect-acp all
   green). Only `apps/server` fails — 4 drift errors, all in PR-added files.
 
-## Remaining fixes (313-commit API drift, all mechanical)
+## Drift fixes — DONE (committed on devin-local)
+
+All fixes below are applied and committed; full `pnpm typecheck` passes 15/15
+packages. Devin-scoped server tests were run after (see session notes).
+Two extra fixes found on the second typecheck round, same root cause
+(`makeDevinAcpRuntime` now needs `Crypto`):
+
+4. `apps/server/src/provider/Layers/DevinAdapter.ts` — provide
+   `Crypto.Crypto` when building the per-session ACP runtime (mirrors
+   GrokAdapter).
+5. `apps/server/src/textGeneration/DevinTextGeneration.ts` — capture `crypto`
+   in the factory and provide it to the runtime (mirrors GrokTextGeneration).
+
+## Original fix list (313-commit API drift, all mechanical)
 
 1. `apps/server/src/provider/Drivers/DevinDriver.ts:86`
    - `DevinDriverEnv` union missing `BackgroundPolicy` (now required via
@@ -56,6 +69,18 @@ No pushes to the upstream repo — this is a personal local build.
   configured, so a status check can never pop the browser login.
 - NOTE: `apiKey` is stored in `~/.t3/userdata/settings.json` in plaintext
   (masked in UI only). Prefer `WINDSURF_API_KEY` env var if that bothers you.
+
+## Test results (2026-07-31, Windows)
+
+- `vitest run Devin`: 14/30 pass. All failures are **platform noise, not Devin
+  bugs**: control run of the in-tree Grok suites (`vitest run GrokAdapter
+  GrokProvider`) fails identically (18/20 adapter tests, same `spawn EFTYPE`
+  on the mock ACP peer fixture, same provider-probe assertion drift). The
+  repo's test suite targets mac/linux; Windows can't spawn the script fixtures
+  directly.
+- `DevinAcpSupport.test.ts` (pure logic, no spawning): passes fully.
+- Full-suite run for reference: 159/198 files pass; failures (e.g.
+  `bootstrap.test.ts` EBADF fd tests) are the same Windows-environment class.
 
 ## Verification plan
 
