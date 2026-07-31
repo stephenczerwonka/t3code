@@ -590,6 +590,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               : {}),
             ...acpNativeLoggers,
           }).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(Scope.Scope, sessionScope),
             Effect.mapError(
               (cause) =>
