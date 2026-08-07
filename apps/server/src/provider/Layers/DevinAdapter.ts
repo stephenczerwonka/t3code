@@ -577,6 +577,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const cwd = path.resolve(input.cwd.trim());
           const devinModelSelection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          const requestedStartModelId = devinModelSelection?.model
+            ? resolveDevinAcpBaseModelId(devinModelSelection.model)
+            : undefined;
           const existing = sessions.get(input.threadId);
           if (existing && !existing.stopped) {
             yield* stopSessionInternal(existing);
@@ -600,6 +603,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
           const acp = yield* makeDevinAcpRuntime({
             devinSettings,
+            ...(requestedStartModelId ? { model: requestedStartModelId } : {}),
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
@@ -723,16 +727,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ),
           );
 
-          const requestedStartModelId = devinModelSelection?.model
-            ? resolveDevinAcpBaseModelId(devinModelSelection.model)
-            : undefined;
-          const boundModelId = yield* applyDevinAcpModelSelection({
+          const negotiatedModelId = yield* applyDevinAcpModelSelection({
             runtime: acp,
             currentModelId: currentDevinModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
             mapError: (cause) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
           });
+          const boundModelId = negotiatedModelId ?? requestedStartModelId;
 
           const now = yield* nowIso;
           const session: ProviderSession = {

@@ -4,15 +4,12 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
-import * as Cause from "effect/Cause";
-import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -30,11 +27,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import {
-  hasDevinCredentials,
-  makeDevinAcpRuntime,
-  resolveDevinAcpBaseModelId,
-} from "../acp/DevinAcpSupport.ts";
+import { resolveDevinAcpBaseModelId } from "../acp/DevinAcpSupport.ts";
 
 const DEVIN_PRESENTATION = {
   displayName: "Devin",
@@ -47,7 +40,7 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-const DEVIN_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const DEVIN_MODEL_CATALOG_TIMEOUT_MS = 15_000;
 
 const DEVIN_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -104,46 +97,68 @@ function devinModelsFromSettings(
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
-function buildDevinDiscoveredModelsFromSessionModelState(
-  modelState: EffectAcpSchema.SessionModelState | null | undefined,
-): ReadonlyArray<ServerProviderModel> {
-  if (!modelState || modelState.availableModels.length === 0) {
-    return [];
-  }
-  const seen = new Set<string>();
-  return modelState.availableModels
-    .map((model): ServerProviderModel | undefined => {
-      const slug = resolveDevinAcpBaseModelId(model.modelId);
-      if (!slug || seen.has(slug)) {
-        return undefined;
-      }
-      seen.add(slug);
-      return {
-        slug,
-        name: model.name.trim() || slug,
-        isCustom: false,
-        capabilities: EMPTY_CAPABILITIES,
-      };
-    })
-    .filter((model): model is ServerProviderModel => model !== undefined);
-}
+const DevinModelCatalog = Schema.Struct({
+  families: Schema.Array(
+    Schema.Struct({
+      variants: Schema.Array(
+        Schema.Struct({
+          model_uid: Schema.String,
+          label: Schema.String,
+        }),
+      ),
+    }),
+  ),
+});
 
-const discoverDevinModelsViaAcp = (
+const decodeDevinModelCatalog = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(DevinModelCatalog),
+);
+
+export const parseDevinModelCatalog = (raw: string) =>
+  decodeDevinModelCatalog(raw).pipe(
+    Effect.map((catalog) => {
+      const seen = new Set<string>();
+      return catalog.families.flatMap((family) =>
+        family.variants.flatMap((variant): ReadonlyArray<ServerProviderModel> => {
+          const slug = resolveDevinAcpBaseModelId(variant.model_uid);
+          if (!slug || seen.has(slug)) {
+            return [];
+          }
+          seen.add(slug);
+          return [
+            {
+              slug,
+              name: variant.label.trim() || slug,
+              isCustom: false,
+              capabilities: EMPTY_CAPABILITIES,
+            },
+          ];
+        }),
+      );
+    }),
+  );
+
+const runDevinModelCatalogCommand = (
   devinSettings: DevinSettings,
   environment: NodeJS.ProcessEnv = process.env,
 ) =>
   Effect.gen(function* () {
-    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const acp = yield* makeDevinAcpRuntime({
-      devinSettings,
-      environment,
-      childProcessSpawner,
-      cwd: process.cwd(),
-      clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
-    });
-    const started = yield* acp.start();
-    return buildDevinDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
-  }).pipe(Effect.scoped);
+    const command = devinSettings.binaryPath || "devin";
+    const spawnCommand = yield* resolveSpawnCommand(
+      command,
+      ["models", "list", "--format", "json"],
+      {
+        env: environment,
+      },
+    );
+    return yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: environment,
+        shell: spawnCommand.shell,
+      }),
+    );
+  });
 
 const runDevinVersionCommand = (
   devinSettings: DevinSettings,
@@ -166,11 +181,7 @@ const runDevinVersionCommand = (
 export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(function* (
   devinSettings: DevinSettings,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<
-  ServerProviderDraft,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
-> {
+): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = devinModelsFromSettings(devinSettings.customModels);
 
@@ -256,74 +267,38 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
     });
   }
 
-  // Devin's ACP server never reads local CLI credentials — without an API
-  // key the authenticate call would start a PKCE browser login, which must
-  // not happen from a background status probe. Skip model discovery, but
-  // keep the provider selectable: starting a session triggers the PKCE
-  // browser flow as an interactive fallback.
-  if (!hasDevinCredentials(devinSettings, environment)) {
-    return buildServerProvider({
-      presentation: DEVIN_PRESENTATION,
-      enabled: devinSettings.enabled,
-      checkedAt,
-      models: fallbackModels,
-      probe: {
-        installed: true,
-        version,
-        status: "ready",
-        auth: { status: "unauthenticated" },
-        message:
-          "No API key configured — starting a session will open Devin's browser login. Set an API key in provider settings (or WINDSURF_API_KEY) to skip it and enable model discovery.",
-      },
+  const catalogResult = yield* runDevinModelCatalogCommand(devinSettings, environment).pipe(
+    Effect.timeoutOption(DEVIN_MODEL_CATALOG_TIMEOUT_MS),
+    Effect.result,
+  );
+  let discoveredModels: ReadonlyArray<ServerProviderModel> = [];
+  if (Result.isFailure(catalogResult)) {
+    yield* Effect.logWarning("Devin model catalog command failed", {
+      errorTag: catalogResult.failure._tag,
     });
+  } else if (Option.isNone(catalogResult.success)) {
+    yield* Effect.logWarning(
+      `Devin model catalog timed out after ${DEVIN_MODEL_CATALOG_TIMEOUT_MS}ms.`,
+    );
+  } else if (catalogResult.success.value.code !== 0) {
+    yield* Effect.logWarning("Devin model catalog command exited with a non-zero status", {
+      exitCode: catalogResult.success.value.code,
+      stdoutLength: catalogResult.success.value.stdout.length,
+      stderrLength: catalogResult.success.value.stderr.length,
+    });
+  } else {
+    const decodedCatalog = yield* parseDevinModelCatalog(catalogResult.success.value.stdout).pipe(
+      Effect.result,
+    );
+    if (Result.isSuccess(decodedCatalog)) {
+      discoveredModels = decodedCatalog.success;
+    } else {
+      yield* Effect.logWarning("Failed to decode Devin model catalog", {
+        errorTag: decodedCatalog.failure._tag,
+      });
+    }
   }
 
-  const discoveryExit = yield* discoverDevinModelsViaAcp(devinSettings, environment).pipe(
-    Effect.timeoutOption(DEVIN_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
-    Effect.exit,
-  );
-  if (Exit.isFailure(discoveryExit)) {
-    yield* Effect.logWarning("Devin ACP model discovery failed", {
-      errorTag: causeErrorTag(discoveryExit.cause),
-    });
-    const authRejected = /invalid api key|authentication (failed|required)/i.test(
-      Cause.pretty(discoveryExit.cause),
-    );
-    return buildServerProvider({
-      presentation: DEVIN_PRESENTATION,
-      enabled: devinSettings.enabled,
-      checkedAt,
-      models: fallbackModels,
-      probe: {
-        installed: true,
-        version,
-        status: authRejected ? "warning" : "error",
-        auth: { status: authRejected ? "unauthenticated" : "unknown" },
-        message: authRejected
-          ? "Devin rejected the configured API key. Clear it in provider settings to use the browser login flow instead."
-          : "Devin CLI is installed but ACP startup failed. Check server logs for details.",
-      },
-    });
-  }
-  if (Option.isNone(discoveryExit.value)) {
-    yield* Effect.logWarning(
-      `Devin ACP model discovery timed out after ${DEVIN_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
-    );
-    return buildServerProvider({
-      presentation: DEVIN_PRESENTATION,
-      enabled: devinSettings.enabled,
-      checkedAt,
-      models: fallbackModels,
-      probe: {
-        installed: true,
-        version,
-        status: "error",
-        auth: { status: "unknown" },
-        message: `Devin CLI is installed but ACP startup timed out after ${DEVIN_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
-      },
-    });
-  }
-  const discoveredModels = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
       ? devinModelsFromSettings(devinSettings.customModels, discoveredModels)
@@ -338,7 +313,10 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
       installed: true,
       version,
       status: "ready",
-      auth: { status: "unknown" },
+      auth: { status: discoveredModels.length > 0 ? "authenticated" : "unknown" },
+      ...(discoveredModels.length === 0
+        ? { message: "Devin is available, but T3 Code could not load its model catalog." }
+        : {}),
     },
   });
 });
