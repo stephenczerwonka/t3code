@@ -6,7 +6,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { DevinSettings } from "@t3tools/contracts";
 
-import { buildInitialDevinProviderSnapshot, checkDevinProviderStatus } from "./DevinProvider.ts";
+import {
+  buildInitialDevinProviderSnapshot,
+  checkDevinProviderStatus,
+  parseDevinModelCatalog,
+} from "./DevinProvider.ts";
 
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
@@ -32,6 +36,21 @@ describe("buildInitialDevinProviderSnapshot", () => {
       expect(snapshot.version).toBeNull();
       expect(snapshot.message).toContain("Checking Devin");
       expect(snapshot.requiresNewThreadForModelChange).toBe(true);
+    }),
+  );
+});
+
+describe("parseDevinModelCatalog", () => {
+  it.effect("maps model variants into selector entries and removes duplicates", () =>
+    Effect.gen(function* () {
+      const models = yield* parseDevinModelCatalog(
+        '{"families":[{"variants":[{"model_uid":"claude-sonnet-5-high","label":"Claude Sonnet 5 High"},{"model_uid":"adaptive","label":"Adaptive"}]},{"variants":[{"model_uid":"claude-sonnet-5-high","label":"Duplicate"}]}]}',
+      );
+
+      expect(models.map(({ slug, name }) => ({ slug, name }))).toEqual([
+        { slug: "claude-sonnet-5-high", name: "Claude Sonnet 5 High" },
+        { slug: "adaptive", name: "Adaptive" },
+      ]);
     }),
   );
 });
@@ -81,11 +100,8 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
     }),
   );
 
-  it.effect("stays selectable without credentials instead of probing ACP", () =>
+  it.effect("stays selectable when the model catalog is unavailable", () =>
     Effect.gen(function* () {
-      // No API key: model discovery would trigger Devin's PKCE browser
-      // login from a background probe. The probe must skip ACP and report
-      // ready/unauthenticated so the picker still offers the provider.
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -107,13 +123,13 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
 
       expect(snapshot.status).toBe("ready");
       expect(snapshot.installed).toBe(true);
-      expect(snapshot.auth.status).toBe("unauthenticated");
+      expect(snapshot.auth.status).toBe("unknown");
       expect(snapshot.models.map((model) => model.slug)).toEqual(["adaptive"]);
-      expect(snapshot.message).toContain("No API key configured");
+      expect(snapshot.message).toContain("could not load its model catalog");
     }),
   );
 
-  it.effect("reports an error when ACP model discovery is unavailable", () =>
+  it.effect("loads model variants from the CLI catalog", () =>
     Effect.gen(function* () {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -123,21 +139,30 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
           const devinPath = path.join(dir, "devin");
           yield* fs.writeFileString(
             devinPath,
-            ["#!/bin/sh", 'printf "devin 2026.8.18\\n"', "exit 0", ""].join("\n"),
+            [
+              "#!/bin/sh",
+              'if [ "$1" = "--version" ]; then',
+              '  printf "devin 2026.8.18\\n"',
+              "else",
+              `  printf '%s\\n' '{"families":[{"variants":[{"model_uid":"claude-sonnet-5-high","label":"Claude Sonnet 5 High"}]}]}'`,
+              "fi",
+              "exit 0",
+              "",
+            ].join("\n"),
           );
           yield* fs.chmod(devinPath, 0o755);
 
           return yield* checkDevinProviderStatus(
             decodeDevinSettings({ enabled: true, binaryPath: devinPath }),
-            { WINDSURF_API_KEY: "test-api-key" },
+            {},
           );
         }),
       );
 
-      expect(snapshot.status).toBe("error");
+      expect(snapshot.status).toBe("ready");
       expect(snapshot.installed).toBe(true);
-      expect(snapshot.models.map((model) => model.slug)).toEqual(["adaptive"]);
-      expect(snapshot.message).toContain("ACP startup failed");
+      expect(snapshot.auth.status).toBe("authenticated");
+      expect(snapshot.models.map((model) => model.slug)).toEqual(["claude-sonnet-5-high"]);
     }),
   );
 });

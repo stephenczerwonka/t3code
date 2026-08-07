@@ -6,6 +6,7 @@ import {
   applyDevinAcpModelSelection,
   buildDevinAcpSpawnInput,
   hasDevinCredentials,
+  resolveDevinAuthMethod,
   resolveDevinAcpBaseModelId,
 } from "./DevinAcpSupport.ts";
 
@@ -23,11 +24,12 @@ describe("buildDevinAcpSpawnInput", () => {
       { binaryPath: "/usr/local/bin/devin", apiKey: "" },
       "/tmp/project",
       { WINDSURF_API_KEY: "secret" },
+      "claude-sonnet-5-high",
     );
 
     expect(spawn).toEqual({
       command: "/usr/local/bin/devin",
-      args: ["acp"],
+      args: ["acp", "--model", "claude-sonnet-5-high"],
       cwd: "/tmp/project",
       env: { WINDSURF_API_KEY: "secret" },
     });
@@ -46,6 +48,22 @@ describe("hasDevinCredentials", () => {
     expect(hasDevinCredentials({ apiKey: "" }, { WINDSURF_API_KEY: "key" })).toBe(true);
     expect(hasDevinCredentials({ apiKey: "  " }, { WINDSURF_API_KEY: "  " })).toBe(false);
     expect(hasDevinCredentials(null, undefined)).toBe(false);
+  });
+});
+
+describe("resolveDevinAuthMethod", () => {
+  it("prefers the current browser method and supports the legacy API-key method", () => {
+    expect(
+      resolveDevinAuthMethod({
+        authMethods: [{ id: "devin-browser", name: "Log in with browser" }],
+      }),
+    ).toBe("devin-browser");
+    expect(
+      resolveDevinAuthMethod({
+        authMethods: [{ id: "windsurf-api-key", name: "Windsurf API key" }],
+      }),
+    ).toBe("windsurf-api-key");
+    expect(resolveDevinAuthMethod({ authMethods: [] })).toBe("devin-browser");
   });
 });
 

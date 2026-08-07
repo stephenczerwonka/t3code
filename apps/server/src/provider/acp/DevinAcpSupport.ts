@@ -11,6 +11,7 @@ import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 const DEVIN_API_KEY_ENV = "WINDSURF_API_KEY";
+const DEVIN_AUTH_METHOD_BROWSER = "devin-browser";
 const DEVIN_AUTH_METHOD_API_KEY = "windsurf-api-key";
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
 const DEVIN_DEFAULT_MODEL_ID = "adaptive";
@@ -24,16 +25,18 @@ interface DevinAcpRuntimeInput extends Omit<
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly devinSettings: DevinAcpRuntimeDevinSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly model?: string;
 }
 
 export function buildDevinAcpSpawnInput(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  model?: string,
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: devinSettings?.binaryPath || "devin",
-    args: ["acp"],
+    args: ["acp", ...(model ? ["--model", model] : [])],
     cwd,
     env: { ...environment },
   };
@@ -61,6 +64,17 @@ function resolveDevinAuthenticateMeta(
   return apiKey ? { api_key: apiKey } : undefined;
 }
 
+export function resolveDevinAuthMethod(
+  initializeResult: Pick<EffectAcpSchema.InitializeResponse, "authMethods">,
+): string {
+  const advertisedMethods = initializeResult.authMethods ?? [];
+  return (
+    advertisedMethods.find((method) => method.id === DEVIN_AUTH_METHOD_BROWSER)?.id ??
+    advertisedMethods.find((method) => method.id === DEVIN_AUTH_METHOD_API_KEY)?.id ??
+    DEVIN_AUTH_METHOD_BROWSER
+  );
+}
+
 export const makeDevinAcpRuntime = (
   input: DevinAcpRuntimeInput,
 ): Effect.Effect<
@@ -77,8 +91,8 @@ export const makeDevinAcpRuntime = (
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, environment),
-        authMethodId: DEVIN_AUTH_METHOD_API_KEY,
+        spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, environment, input.model),
+        authMethodId: resolveDevinAuthMethod,
         ...(authenticateMeta ? { authenticateMeta } : {}),
       }).pipe(
         Layer.provide(

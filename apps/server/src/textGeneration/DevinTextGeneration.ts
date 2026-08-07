@@ -63,6 +63,7 @@ export const makeDevinTextGeneration = Effect.fn("makeDevinTextGeneration")(func
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeDevinAcpRuntime({
         devinSettings,
+        model: resolvedModel,
         environment,
         childProcessSpawner: commandSpawner,
         cwd,
