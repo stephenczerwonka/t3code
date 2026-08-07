@@ -540,7 +540,14 @@ function cacheCommandResolution(
   });
 }
 
-const isExecutableFile = Effect.fn("shell.isExecutableFile")(function* (
+/**
+ * Deliberately untraced. This runs once per PATH entry per command candidate —
+ * on Windows that is PATHEXT (~10, cased both ways) times every PATH entry, so
+ * a single resolution can emit hundreds of spans. Tracing at this granularity
+ * buried real spans and rotated the trace log every ~90 seconds. The enclosing
+ * `shell.resolveCommandPath` span is the useful unit.
+ */
+const isExecutableFile = Effect.fnUntraced(function* (
   filePath: string,
   platform: NodeJS.Platform,
   windowsPathExtensions: ReadonlyArray<string>,
