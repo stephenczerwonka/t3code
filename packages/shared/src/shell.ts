@@ -491,7 +491,51 @@ function resolveCommandCandidates(
   return Array.from(new Set(candidates));
 }
 
-const isExecutableFile = Effect.fn("shell.isExecutableFile")(function* (
+const MAX_COMMAND_RESOLUTION_CACHE_ENTRIES = 256;
+
+/**
+ * Resolved command paths, keyed by everything the resolution depends on.
+ *
+ * Only *successful* resolutions are cached. A miss is the expensive case, but
+ * caching it would hide a binary installed after the first lookup — exactly the
+ * situation where a user fixes their PATH and expects the app to notice.
+ */
+const commandResolutionCache = new Map<string, string>();
+
+function commandResolutionCacheKey(
+  command: string,
+  platform: NodeJS.Platform,
+  pathValue: string,
+  windowsPathExtensions: ReadonlyArray<string>,
+): string {
+  // NUL-separated: PATH entries and command names routinely contain spaces and
+  // semicolons, but never a NUL, so components cannot bleed across the key.
+  return [platform, command, pathValue, windowsPathExtensions.join(";")].join("\u0000");
+}
+
+function cacheCommandResolution(cacheKey: string, resolvedPath: string): void {
+  if (commandResolutionCache.size >= MAX_COMMAND_RESOLUTION_CACHE_ENTRIES) {
+    const oldestKey = commandResolutionCache.keys().next();
+    if (!oldestKey.done) {
+      commandResolutionCache.delete(oldestKey.value);
+    }
+  }
+  commandResolutionCache.set(cacheKey, resolvedPath);
+}
+
+/** Drops every memoized command resolution. Intended for tests. */
+export function clearCommandResolutionCache(): void {
+  commandResolutionCache.clear();
+}
+
+/**
+ * Deliberately untraced. This runs once per PATH entry per command candidate —
+ * on Windows that is PATHEXT (~10, cased both ways) times every PATH entry, so
+ * a single resolution can emit hundreds of spans. Tracing at this granularity
+ * buried real spans and rotated the trace log every ~90 seconds. The enclosing
+ * `shell.resolveCommandPath` span is the useful unit.
+ */
+const isExecutableFile = Effect.fnUntraced(function* (
   filePath: string,
   platform: NodeJS.Platform,
   windowsPathExtensions: ReadonlyArray<string>,
@@ -538,6 +582,13 @@ const resolveCommandPathForPlatform = Effect.fn("shell.resolveCommandPathForPlat
   if (pathValue.length === 0) {
     return yield* new CommandResolutionError({ command, reason: "not-found" });
   }
+
+  const cacheKey = commandResolutionCacheKey(command, platform, pathValue, windowsPathExtensions);
+  const cached = commandResolutionCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const pathEntries: string[] = [];
   for (const entry of pathValue.split(pathDelimiterForPlatform(platform))) {
     const pathEntry = stripWrappingQuotes(entry.trim());
@@ -550,6 +601,7 @@ const resolveCommandPathForPlatform = Effect.fn("shell.resolveCommandPathForPlat
     for (const candidate of commandCandidates) {
       const candidatePath = path.join(pathEntry, candidate);
       if (yield* isExecutableFile(candidatePath, platform, windowsPathExtensions)) {
+        cacheCommandResolution(cacheKey, candidatePath);
         return candidatePath;
       }
     }

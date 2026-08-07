@@ -2,10 +2,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   extractPathFromShellOutput,
+  clearCommandResolutionCache,
   CommandAvailability,
   type CommandAvailabilityChecker,
   isCommandAvailable,
@@ -362,6 +365,38 @@ effectIt.layer(NodeServices.layer)("resolveCommandPath", (it) => {
       }).pipe(Effect.provideService(HostProcessPlatform, "win32"), Effect.result);
 
       expect(result._tag).toBe("Failure");
+    }),
+  );
+
+  it.effect("memoizes a hit but keeps re-probing after a miss", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fileSystem.makeTempDirectory();
+      const executablePath = path.join(directory, "t3-cache-probe.CMD");
+      const env = { PATH: directory, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+      const resolve = () =>
+        resolveCommandPath("t3-cache-probe", { env }).pipe(
+          Effect.provideService(HostProcessPlatform, "win32"),
+          Effect.result,
+        );
+
+      clearCommandResolutionCache();
+
+      // A miss must never be cached, or a binary installed afterwards stays
+      // invisible until restart.
+      expect((yield* resolve())._tag).toBe("Failure");
+      yield* fileSystem.writeFileString(executablePath, "@echo off");
+      const found = yield* resolve();
+      expect(found._tag).toBe("Success");
+
+      // A hit is memoized, so the answer survives the file going away.
+      yield* fileSystem.remove(executablePath);
+      expect(yield* resolve()).toEqual(found);
+
+      clearCommandResolutionCache();
+      expect((yield* resolve())._tag).toBe("Failure");
+      yield* fileSystem.remove(directory, { recursive: true });
     }),
   );
 });
