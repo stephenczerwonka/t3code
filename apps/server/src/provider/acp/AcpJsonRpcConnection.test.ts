@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -286,7 +287,8 @@ describe("AcpSessionRuntime", () => {
       const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit)) {
-        expect(JSON.stringify(exit.cause)).toContain("no agent activity");
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("no agent activity");
       }
     }).pipe(
       Effect.provide(
