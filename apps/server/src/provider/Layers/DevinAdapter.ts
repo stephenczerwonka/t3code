@@ -173,7 +173,33 @@ function parseDevinResume(raw: unknown): { sessionId: string } | undefined {
   return { sessionId: raw.sessionId.trim() };
 }
 
-function selectPermissionOptionId(
+/**
+ * Devin overloads `allow_always` across options with very different blast
+ * radii. A single request carries all of:
+ *
+ *   allow_session        "allow `git status` commands (this session)"
+ *   allow_always         "always allow ... in `web-frontend-angularjs`"
+ *   allow_always_global  "always allow ... in all projects"
+ *   switch_bypass        "switch to bypass mode"
+ *
+ * `kind` cannot tell them apart, so taking the first match means Devin's array
+ * ordering decides what gets selected. Today that happens to be the
+ * session-scoped option; a reorder on their side would silently select bypass
+ * mode and disable permission prompting altogether.
+ *
+ * Options that widen permission beyond the current session are therefore never
+ * selectable here — neither automatically, nor by mapping a user's
+ * "accept for session" choice onto them.
+ */
+const ESCALATING_PERMISSION_OPTION_IDS: ReadonlySet<string> = new Set([
+  "switch_bypass",
+  "allow_always_global",
+]);
+
+/** Preferred when several `allow_always` options survive the escalation filter. */
+const SESSION_SCOPED_PERMISSION_OPTION_ID = "allow_session";
+
+export function selectPermissionOptionId(
   request: EffectAcpSchema.RequestPermissionRequest,
   decision: Exclude<ProviderApprovalDecision, "cancel">,
 ): string | undefined {
@@ -183,11 +209,19 @@ function selectPermissionOptionId(
       : decision === "accept"
         ? "allow_once"
         : "reject_once";
-  const option = request.options.find((entry) => entry.kind === kind);
-  return option?.optionId.trim() || undefined;
+  const candidates = request.options.filter((entry) => {
+    const optionId = entry.optionId.trim();
+    return (
+      entry.kind === kind && optionId.length > 0 && !ESCALATING_PERMISSION_OPTION_IDS.has(optionId)
+    );
+  });
+  const preferred =
+    candidates.find((entry) => entry.optionId.trim() === SESSION_SCOPED_PERMISSION_OPTION_ID) ??
+    candidates[0];
+  return preferred?.optionId.trim() || undefined;
 }
 
-function selectAutoApprovedPermissionOption(
+export function selectAutoApprovedPermissionOption(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): string | undefined {
   return (
@@ -667,6 +701,20 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   };
                 }),
               ),
+            );
+            // Devin leans heavily on vendor extensions (`cognition.ai/*`).
+            // Unrecognised ones are still refused with methodNotFound, exactly
+            // as the protocol does by default — but they are recorded first, so
+            // extension traffic this adapter does not implement is visible when
+            // diagnosing a session instead of vanishing.
+            yield* acp.handleUnknownExtRequest((method, params) =>
+              Effect.gen(function* () {
+                yield* logNative(input.threadId, method, params);
+                return yield* EffectAcpErrors.AcpRequestError.methodNotFound(method);
+              }),
+            );
+            yield* acp.handleUnknownExtNotification((method, params) =>
+              logNative(input.threadId, method, params),
             );
             return yield* acp.start();
           }).pipe(

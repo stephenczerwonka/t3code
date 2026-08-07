@@ -26,7 +26,12 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { devinPromptSettlementBelongsToContext, makeDevinAdapter } from "./DevinAdapter.ts";
+import {
+  devinPromptSettlementBelongsToContext,
+  makeDevinAdapter,
+  selectAutoApprovedPermissionOption,
+  selectPermissionOptionId,
+} from "./DevinAdapter.ts";
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -120,6 +125,67 @@ it("requires a settlement to match the live Devin turn", () => {
       turnId: staleTurnId,
     }),
   );
+});
+
+const devinPermissionRequest = (
+  options: ReadonlyArray<{ kind: string; name: string; optionId: string }>,
+) =>
+  ({
+    sessionId: "military-hill",
+    options,
+    toolCall: { toolCallId: "call-1" },
+  }) as unknown as Parameters<typeof selectAutoApprovedPermissionOption>[0];
+
+// Option set taken verbatim from a live Devin `session/request_permission`.
+const DEVIN_PERMISSION_OPTIONS = [
+  { kind: "allow_once", name: "Allow", optionId: "allow_once" },
+  {
+    kind: "allow_always",
+    name: "Yes, allow `git status` commands (this session)",
+    optionId: "allow_session",
+  },
+  {
+    kind: "allow_always",
+    name: "Yes, always allow in `web-frontend-angularjs`",
+    optionId: "allow_always",
+  },
+  {
+    kind: "allow_always",
+    name: "Yes, always allow in all projects",
+    optionId: "allow_always_global",
+  },
+  { kind: "allow_always", name: "Yes, switch to bypass mode", optionId: "switch_bypass" },
+  { kind: "reject_once", name: "Reject", optionId: "reject_once" },
+];
+
+it("prefers the session-scoped option over broader Devin permission grants", () => {
+  const request = devinPermissionRequest(DEVIN_PERMISSION_OPTIONS);
+
+  assert.equal(selectAutoApprovedPermissionOption(request), "allow_session");
+  assert.equal(selectPermissionOptionId(request, "acceptForSession"), "allow_session");
+});
+
+it("does not let Devin's option ordering select bypass mode", () => {
+  const request = devinPermissionRequest(DEVIN_PERMISSION_OPTIONS.toReversed());
+
+  assert.equal(selectAutoApprovedPermissionOption(request), "allow_session");
+  assert.notEqual(selectPermissionOptionId(request, "acceptForSession"), "switch_bypass");
+});
+
+it("falls back to a single-turn allowance when every persistent option escalates", () => {
+  const request = devinPermissionRequest([
+    { kind: "allow_always", name: "Yes, switch to bypass mode", optionId: "switch_bypass" },
+    {
+      kind: "allow_always",
+      name: "Yes, always allow in all projects",
+      optionId: "allow_always_global",
+    },
+    { kind: "allow_once", name: "Allow", optionId: "allow_once" },
+    { kind: "reject_once", name: "Reject", optionId: "reject_once" },
+  ]);
+
+  assert.isUndefined(selectPermissionOptionId(request, "acceptForSession"));
+  assert.equal(selectAutoApprovedPermissionOption(request), "allow_once");
 });
 
 it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
