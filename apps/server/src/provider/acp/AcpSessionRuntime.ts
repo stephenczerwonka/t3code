@@ -49,6 +49,14 @@ export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStre
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+/**
+ * A prompt turn has no bounded duration — a legitimate turn can think for
+ * minutes without emitting anything. What is never legitimate is total silence
+ * from the agent indefinitely, which leaves the turn pending forever with no
+ * way for a caller to observe it. This bounds *inactivity*, not turn length.
+ */
+const defaultPromptIdleTimeout = Duration.minutes(10);
+const promptIdlePollInterval = Duration.seconds(1);
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -63,12 +71,20 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /**
+   * How long a prompt turn may go without any agent activity before it fails.
+   * Activity is any `session/update` for this session. Defaults to
+   * {@link defaultPromptIdleTimeout}.
+   */
+  readonly promptIdleTimeout?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  readonly authMethodId:
+    | string
+    | ((initializeResult: EffectAcpSchema.InitializeResponse) => string);
   /**
    * Optional `_meta` payload attached to the `authenticate` request. Some
    * agents (e.g. Devin) accept credentials such as API keys through
@@ -303,6 +319,36 @@ export const make = (
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const lastAgentActivityAtMillisRef = yield* Ref.make<number | undefined>(undefined);
+    const promptIdleTimeout = Duration.fromInputUnsafe(
+      options.promptIdleTimeout ?? defaultPromptIdleTimeout,
+    );
+
+    /**
+     * Fails once the agent has been silent for longer than the idle timeout.
+     * Runs alongside the prompt RPC so a turn that will never settle surfaces
+     * as an error instead of pending forever.
+     */
+    const waitForPromptIdleTimeout = Effect.gen(function* () {
+      const idleTimeoutMillis = Duration.toMillis(promptIdleTimeout);
+      while (true) {
+        yield* Effect.sleep(promptIdlePollInterval);
+        const lastActivityAtMillis = yield* Ref.get(lastAgentActivityAtMillisRef);
+        if (lastActivityAtMillis === undefined) {
+          continue;
+        }
+        const nowMillis = yield* Clock.currentTimeMillis;
+        const idleMillis = nowMillis - lastActivityAtMillis;
+        if (idleMillis >= idleTimeoutMillis) {
+          return yield* new EffectAcpErrors.AcpTransportError({
+            operation: "call-rpc",
+            method: "session/prompt",
+            detail: `session/prompt saw no agent activity for ${Math.round(idleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
+            cause: undefined,
+          });
+        }
+      }
+    });
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -375,6 +421,10 @@ export const make = (
 
     yield* acp.handleSessionUpdate((notification) =>
       Effect.gen(function* () {
+        // Stamped before any routing decision: an update the runtime drops
+        // (replay, child session, pre-start) still proves the agent is alive,
+        // and treating it as silence would fail live turns.
+        yield* Ref.set(lastAgentActivityAtMillisRef, yield* Clock.currentTimeMillis);
         const gate = yield* Ref.get(sessionLoadGateRef);
         if (Option.isSome(gate) && gate.value.active) {
           const lastActivityAtMillis = yield* Clock.currentTimeMillis;
@@ -548,7 +598,10 @@ export const make = (
       );
 
       const authenticatePayload = {
-        methodId: options.authMethodId,
+        methodId:
+          typeof options.authMethodId === "function"
+            ? options.authMethodId(initializeResult)
+            : options.authMethodId,
         ...(options.authenticateMeta ? { _meta: options.authenticateMeta } : {}),
       } satisfies EffectAcpSchema.AuthenticateRequest;
 
@@ -744,7 +797,13 @@ export const make = (
               acp.agent.prompt(requestPayload),
             ).pipe(Effect.forkIn(runtimeScope));
             yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
-            return yield* Fiber.join(promptRpcFiber).pipe(
+            // Idle is measured from the start of this turn, not from whatever
+            // the previous turn happened to leave behind.
+            yield* Ref.set(lastAgentActivityAtMillisRef, yield* Clock.currentTimeMillis);
+            return yield* Effect.raceFirst(
+              Fiber.join(promptRpcFiber),
+              waitForPromptIdleTimeout,
+            ).pipe(
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)
                   ? Effect.succeed(cancelledResponse)

@@ -13,16 +13,105 @@ function structuralMethod(value: string): string {
   return value.length <= 128 && /^[A-Za-z][A-Za-z0-9._:/-]*$/.test(value) ? value : "unknown";
 }
 
+const MAX_DESCRIBED_ENVELOPES = 8;
+const MAX_STRUCTURAL_ID_LENGTH = 64;
+
+/**
+ * JSON-RPC ids are protocol-generated correlation handles, never user content,
+ * so they are safe to record. Anything that does not look like one is dropped
+ * rather than guessed at.
+ */
+function structuralRequestId(value: unknown): string | number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_STRUCTURAL_ID_LENGTH &&
+    /^[A-Za-z0-9._:-]+$/.test(value)
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+/**
+ * Extracts only the routing envelope of a protocol message — tag, method, and
+ * correlation id. Params and results are deliberately never read, so a message
+ * can be identified in a stalled session without its content reaching the log.
+ */
+function describeEnvelope(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (value === null || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const method =
+    typeof record.tag === "string"
+      ? record.tag
+      : typeof record.method === "string"
+        ? record.method
+        : undefined;
+  const requestId = structuralRequestId(record.id) ?? structuralRequestId(record.requestId);
+  const described = {
+    ...(typeof record._tag === "string" ? { messageTag: errorTag(record) } : {}),
+    ...(method !== undefined ? { method: structuralMethod(method) } : {}),
+    ...(requestId !== undefined ? { requestId } : {}),
+  };
+  return Object.keys(described).length > 0 ? described : undefined;
+}
+
+function describeEnvelopes(
+  value: unknown,
+): ReadonlyArray<Readonly<Record<string, unknown>>> | undefined {
+  const values = Array.isArray(value) ? value : [value];
+  const described = values
+    .slice(0, MAX_DESCRIBED_ENVELOPES)
+    .map(describeEnvelope)
+    .filter((entry): entry is Readonly<Record<string, unknown>> => entry !== undefined);
+  return described.length > 0 ? described : undefined;
+}
+
+/** Raw protocol frames arrive as ndjson, so each line is parsed independently. */
+function describeRawFrame(
+  raw: string,
+): ReadonlyArray<Readonly<Record<string, unknown>>> | undefined {
+  const described: Array<Readonly<Record<string, unknown>>> = [];
+  for (const line of raw.split("\n")) {
+    if (described.length >= MAX_DESCRIBED_ENVELOPES) break;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    described.push(...(describeEnvelopes(parsed) ?? []));
+  }
+  return described.length > 0 ? described.slice(0, MAX_DESCRIBED_ENVELOPES) : undefined;
+}
+
 function summarizePayload(payload: unknown): Readonly<Record<string, unknown>> {
   if (payload === null) return { valueType: "null" };
   if (typeof payload === "string") {
-    return { valueType: "string", byteLength: new TextEncoder().encode(payload).byteLength };
+    const messages = describeRawFrame(payload);
+    return {
+      valueType: "string",
+      byteLength: new TextEncoder().encode(payload).byteLength,
+      ...(messages ? { messages } : {}),
+    };
   }
   if (payload instanceof Uint8Array) {
     return { valueType: "bytes", byteLength: payload.byteLength };
   }
   if (Array.isArray(payload)) {
-    return { valueType: "array", itemCount: payload.length };
+    const messages = describeEnvelopes(payload);
+    return {
+      valueType: "array",
+      itemCount: payload.length,
+      ...(messages ? { messages } : {}),
+    };
   }
   if (typeof payload !== "object") {
     return { valueType: typeof payload };
@@ -33,8 +122,7 @@ function summarizePayload(payload: unknown): Readonly<Record<string, unknown>> {
     return {
       valueType: "object",
       fieldCount: Object.keys(record).length,
-      ...(typeof record._tag === "string" ? { messageTag: errorTag(record) } : {}),
-      ...(typeof record.tag === "string" ? { method: structuralMethod(record.tag) } : {}),
+      ...describeEnvelope(record),
     };
   } catch {
     return { valueType: "object" };

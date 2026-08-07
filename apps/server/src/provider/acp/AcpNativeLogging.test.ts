@@ -67,6 +67,45 @@ nodeServicesIt("ACP native logging", (it) => {
     }),
   );
 
+  it.effect("identifies protocol messages by envelope without recording content", () =>
+    Effect.gen(function* () {
+      const records: Array<unknown> = [];
+      const nativeEventLogger: EventNdjsonLogger = {
+        filePath: "/tmp/provider-native.ndjson",
+        write: (event) => Effect.sync(() => void records.push(event)),
+        close: () => Effect.void,
+      };
+      const makeLogger = yield* makeAcpNativeLoggerFactory();
+      const logger = makeLogger({
+        nativeEventLogger,
+        provider: ProviderDriverKind.make("devin"),
+        threadId: ThreadId.make("thread-1"),
+      });
+      const protocolLogger = logger.protocolLogging?.logger;
+      assert.exists(protocolLogger);
+      if (!protocolLogger) return;
+
+      const secret = "secret-prompt-body";
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "raw",
+        payload: `{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"note":"${secret}"}}`,
+      });
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "decoded",
+        payload: [{ _tag: "Request", tag: "fs/read_text_file", id: 7, payload: { path: secret } }],
+      });
+
+      const serialized = encodeUnknownJson(records);
+      assert.notInclude(serialized, secret);
+      assert.include(serialized, '"method":"session/request_permission"');
+      assert.include(serialized, '"requestId":42');
+      assert.include(serialized, '"method":"fs/read_text_file"');
+      assert.include(serialized, '"requestId":7');
+    }),
+  );
+
   it.effect("logs a structural tag when the native writer defects", () => {
     const messages: Array<unknown> = [];
     const logCapture = Logger.make<unknown, void>(({ message }) => {
