@@ -1,5 +1,6 @@
 import { type DevinSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
@@ -15,6 +16,13 @@ const DEVIN_AUTH_METHOD_BROWSER = "devin-browser";
 const DEVIN_AUTH_METHOD_API_KEY = "windsurf-api-key";
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
 const DEVIN_DEFAULT_MODEL_ID = "adaptive";
+/**
+ * Devin turns execute remotely and can emit no `session/update` for far longer
+ * than a local CLI agent while the cloud session works; the shared 10-minute
+ * prompt idle default kills healthy long turns. Bound Devin silence at an
+ * hour instead — still finite, so a genuinely wedged turn surfaces.
+ */
+const DEVIN_PROMPT_IDLE_TIMEOUT = Duration.minutes(60);
 
 type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath" | "apiKey">;
 
@@ -75,6 +83,13 @@ export function resolveDevinAuthMethod(
   );
 }
 
+/** An explicit caller override always wins over the Devin default. */
+export function resolveDevinPromptIdleTimeout(
+  configured: Duration.Input | undefined,
+): Duration.Input {
+  return configured ?? DEVIN_PROMPT_IDLE_TIMEOUT;
+}
+
 export const makeDevinAcpRuntime = (
   input: DevinAcpRuntimeInput,
 ): Effect.Effect<
@@ -91,6 +106,7 @@ export const makeDevinAcpRuntime = (
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
+        promptIdleTimeout: resolveDevinPromptIdleTimeout(input.promptIdleTimeout),
         spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, environment, input.model),
         authMethodId: resolveDevinAuthMethod,
         ...(authenticateMeta ? { authenticateMeta } : {}),

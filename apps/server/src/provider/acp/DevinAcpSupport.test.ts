@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as EffectAcpErrors from "effect-acp/errors";
 
@@ -8,7 +9,15 @@ import {
   hasDevinCredentials,
   resolveDevinAuthMethod,
   resolveDevinAcpBaseModelId,
+  resolveDevinPromptIdleTimeout,
 } from "./DevinAcpSupport.ts";
+
+describe("resolveDevinPromptIdleTimeout", () => {
+  it("defaults to one hour and honors an explicit override", () => {
+    expect(resolveDevinPromptIdleTimeout(undefined)).toEqual(Duration.minutes(60));
+    expect(resolveDevinPromptIdleTimeout("30 seconds")).toBe("30 seconds");
+  });
+});
 
 describe("resolveDevinAcpBaseModelId", () => {
   it("normalizes empty and custom Devin model ids", () => {
