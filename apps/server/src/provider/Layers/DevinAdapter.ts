@@ -102,13 +102,16 @@ interface DevinSessionContext {
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
+  /** Newest turn opened by sendTurn; mirrored into session.activeTurnId. */
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
-  /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
-  promptsInFlight: number;
+  /** In-flight prompt turns, oldest first. Devin's ACP server serializes
+   * session/prompt, so the head is the wire-active prompt and untagged
+   * session/update traffic attributes to it. A sendTurn during a running turn
+   * is a steer: it opens its own new turn at the tail rather than continuing
+   * the active one. */
+  inFlightTurnIds: Array<TurnId>;
   currentModelId: string | undefined;
   stopped: boolean;
 }
@@ -154,9 +157,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const resolveNotificationTurnId = (ctx: DevinSessionContext): TurnId | undefined =>
-  ctx.activeTurnId;
+  ctx.inFlightTurnIds[0];
 
-const resolveCallbackTurnId = (ctx: DevinSessionContext): TurnId | undefined => ctx.activeTurnId;
+const resolveCallbackTurnId = (ctx: DevinSessionContext): TurnId | undefined =>
+  ctx.inFlightTurnIds[0];
 
 const resolveSessionCallbackTurnId = (
   sessions: ReadonlyMap<ThreadId, DevinSessionContext>,
@@ -242,13 +246,12 @@ function completedStopReasonFromPromptResponse(
 export function devinPromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
-  readonly liveActiveTurnId: TurnId | undefined;
-  readonly liveSessionActiveTurnId: TurnId | undefined;
+  readonly inFlightTurnIds: ReadonlyArray<TurnId>;
   readonly turnId: TurnId;
 }): boolean {
   return (
     input.liveAcpSessionId === input.expectedAcpSessionId &&
-    (input.liveActiveTurnId === input.turnId || input.liveSessionActiveTurnId === input.turnId)
+    input.inFlightTurnIds.includes(input.turnId)
   );
 }
 
@@ -330,40 +333,25 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         readonly errorMessage?: string;
         readonly completedStopReason?: EffectAcpSchema.StopReason | null;
         readonly emitTurnCompletion?: boolean;
-        /** Interrupt/cancel: drop every outstanding prompt slot and settle once. */
+        /** Interrupt/cancel: drop every in-flight turn and settle once. */
         readonly settleAllPrompts?: boolean;
       },
     ) =>
       Effect.gen(function* () {
         const liveCtx = sessions.get(threadId);
-        if (!liveCtx) {
+        if (!liveCtx || liveCtx.acpSessionId !== expectedAcpSessionId) {
           return;
         }
-        const settlementBelongsToLiveContext = devinPromptSettlementBelongsToContext({
-          liveAcpSessionId: liveCtx.acpSessionId,
-          expectedAcpSessionId,
-          liveActiveTurnId: liveCtx.activeTurnId,
-          liveSessionActiveTurnId: liveCtx.session.activeTurnId,
-          turnId,
-        });
-        if (!settlementBelongsToLiveContext) {
-          // interruptTurn already consumed every prompt slot for this turn. A
-          // late prompt result must neither emit a second terminal event nor
-          // consume a slot belonging to a newer turn on the same ACP session.
-          if (
-            liveCtx.acpSessionId !== expectedAcpSessionId ||
-            liveCtx.interruptedTurnIds.has(turnId)
-          ) {
-            return;
-          }
-          if (options?.emitTurnCompletion !== false) {
+
+        const emitTerminalEvent = (settledTurnId: TurnId) =>
+          Effect.gen(function* () {
             if (options?.errorMessage !== undefined) {
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
                 provider: PROVIDER,
                 threadId,
-                turnId,
+                turnId: settledTurnId,
                 payload: {
                   state: "failed",
                   errorMessage: options.errorMessage,
@@ -375,88 +363,78 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 ...(yield* makeEventStamp()),
                 provider: PROVIDER,
                 threadId,
-                turnId,
+                turnId: settledTurnId,
                 payload: {
                   state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
                   stopReason: options.completedStopReason ?? null,
                 },
               });
             }
+          });
+
+        if (options?.settleAllPrompts) {
+          // Interrupt/cancel: every in-flight turn is dropped. Only the
+          // session's active turn earns a terminal event — turns superseded by
+          // a steer already settled in the projector when the newer turn
+          // started, and a terminal event for a non-active turn is rejected by
+          // ingestion anyway.
+          const activeTurnId = liveCtx.session.activeTurnId ?? liveCtx.activeTurnId;
+          liveCtx.inFlightTurnIds = [];
+          const canEmitTurnCompletion =
+            liveCtx.session.status === "running" || liveCtx.session.status === "connecting";
+          const updatedAt = yield* nowIso;
+          const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
+          liveCtx.activeTurnId = undefined;
+          liveCtx.session = {
+            ...readySession,
+            status: "ready",
+            updatedAt,
+          };
+          if (options?.emitTurnCompletion === false || !canEmitTurnCompletion) {
+            return;
+          }
+          if (activeTurnId !== undefined) {
+            yield* emitTerminalEvent(activeTurnId);
           }
           return;
         }
-        let settleTurnId = turnId;
-        if (options?.settleAllPrompts) {
-          liveCtx.promptsInFlight = 0;
-          if (liveCtx.activeTurnId !== turnId && liveCtx.session.activeTurnId !== turnId) {
-            const fallbackTurnId = liveCtx.activeTurnId ?? liveCtx.session.activeTurnId;
-            if (!fallbackTurnId) {
-              if (liveCtx.session.status === "running" || liveCtx.session.status === "connecting") {
-                const updatedAt = yield* nowIso;
-                const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
-                liveCtx.activeTurnId = undefined;
-                liveCtx.session = {
-                  ...readySession,
-                  status: "ready",
-                  updatedAt,
-                };
-              }
-              return;
-            }
-            settleTurnId = fallbackTurnId;
-          }
-        } else {
-          const remainingPrompts = Math.max(0, liveCtx.promptsInFlight - 1);
-          if (
-            remainingPrompts > 0 ||
-            liveCtx.activeTurnId !== settleTurnId ||
-            liveCtx.session.activeTurnId !== settleTurnId
-          ) {
-            liveCtx.promptsInFlight = remainingPrompts;
-            return;
-          }
-          liveCtx.promptsInFlight = remainingPrompts;
+
+        if (
+          !devinPromptSettlementBelongsToContext({
+            liveAcpSessionId: liveCtx.acpSessionId,
+            expectedAcpSessionId,
+            inFlightTurnIds: liveCtx.inFlightTurnIds,
+            turnId,
+          })
+        ) {
+          // Late settlement for an interrupted or already-settled prompt: it
+          // must neither emit a second terminal event nor disturb the queue.
+          return;
         }
-        const updatedAt = yield* nowIso;
-        const canEmitTurnCompletion =
-          liveCtx.session.status === "running" || liveCtx.session.status === "connecting";
-        const shouldEmitFailedTurn = options?.errorMessage !== undefined && canEmitTurnCompletion;
-        const shouldEmitCompletedTurn =
-          options?.completedStopReason !== undefined && canEmitTurnCompletion;
-        const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
-        liveCtx.activeTurnId = undefined;
-        liveCtx.session = {
-          ...readySession,
-          status: "ready",
-          updatedAt,
-        };
+        liveCtx.inFlightTurnIds = liveCtx.inFlightTurnIds.filter((id) => id !== turnId);
+
+        if (liveCtx.inFlightTurnIds.length === 0) {
+          const updatedAt = yield* nowIso;
+          const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
+          liveCtx.activeTurnId = undefined;
+          liveCtx.session = {
+            ...readySession,
+            status: "ready",
+            updatedAt,
+          };
+        }
         if (options?.emitTurnCompletion === false) {
           return;
         }
-        if (shouldEmitFailedTurn) {
-          yield* offerRuntimeEvent({
-            type: "turn.completed",
-            ...(yield* makeEventStamp()),
-            provider: PROVIDER,
-            threadId,
-            turnId: settleTurnId,
-            payload: {
-              state: "failed",
-              errorMessage: options.errorMessage,
-            },
-          });
-        } else if (shouldEmitCompletedTurn) {
-          yield* offerRuntimeEvent({
-            type: "turn.completed",
-            ...(yield* makeEventStamp()),
-            provider: PROVIDER,
-            threadId,
-            turnId: settleTurnId,
-            payload: {
-              state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
-              stopReason: options.completedStopReason ?? null,
-            },
-          });
+        const canEmitTurnCompletion =
+          liveCtx.session.status === "running" ||
+          liveCtx.session.status === "connecting" ||
+          liveCtx.session.status === "ready";
+        // Every started turn gets exactly one terminal event. For a turn
+        // superseded by a steer, ingestion rejects the lifecycle change (it is
+        // not the active turn), so this cannot flip the session ready early.
+        if (canEmitTurnCompletion) {
+          yield* emitTerminalEvent(turnId);
         }
       });
 
@@ -766,7 +744,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
-            promptsInFlight: 0,
+            inFlightTurnIds: [],
             currentModelId: boundModelId,
             stopped: false,
           };
@@ -905,21 +883,22 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
-            // A sendTurn while a prompt is in flight is a steer: the agent
-            // folds the new prompt into the ongoing work, so the active turn
-            // id is reused instead of opening a new turn.
-            const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
-            const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
-            // Count this prompt immediately so a superseded in-flight prompt
-            // resolving from here on does not settle the turn; decremented on
-            // preparation failure here, and after the prompt below otherwise.
-            ctx.promptsInFlight += 1;
+            // A sendTurn while a prompt is in flight is a steer. Devin's ACP
+            // server serializes session/prompt (the steered prompt only starts
+            // once the in-flight one returns), so the steer opens its own new
+            // turn at the tail of the queue instead of continuing the active
+            // turn — each prompt settles its own turn with its own result.
+            const queuedBehind = ctx.inFlightTurnIds.length > 0;
+            const turnId = TurnId.make(yield* randomUUIDv4);
+            // Enqueue immediately so a superseded in-flight prompt resolving
+            // from here on settles its own turn; removed on settlement below.
+            ctx.inFlightTurnIds = [...ctx.inFlightTurnIds, turnId];
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
             ctx.session = {
               ...ctx.session,
-              status: steeringTurnId === undefined ? "connecting" : "running",
+              status: queuedBehind ? "running" : "connecting",
               activeTurnId: turnId,
               updatedAt: yield* nowIso,
             };
@@ -1006,7 +985,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   detail: "Devin prompt was interrupted during preparation.",
                 });
               }
-              if (steeringTurnId === undefined) {
+              if (!queuedBehind) {
                 ctx.lastPlanFingerprint = undefined;
               }
               ctx.session = {
@@ -1017,16 +996,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 ...(displayModel ? { model: displayModel } : {}),
               };
 
-              if (steeringTurnId === undefined) {
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: displayModel ? { model: displayModel } : {},
-                });
-              }
+              yield* offerRuntimeEvent({
+                type: "turn.started",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: displayModel ? { model: displayModel } : {},
+              });
 
               return {
                 acp: ctx.acp,
@@ -1119,11 +1096,10 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 };
               }
 
-              if (
-                ctx.promptsInFlight <= 0 ||
-                ctx.activeTurnId !== prepared.turnId ||
-                ctx.session.activeTurnId !== prepared.turnId
-              ) {
+              if (!ctx.inFlightTurnIds.includes(prepared.turnId)) {
+                // interruptTurn already consumed this turn's queue slot. A late
+                // prompt result must neither emit a second terminal event nor
+                // disturb turns queued behind it.
                 yield* Ref.set(promptSettled, true);
                 return {
                   threadId: input.threadId,
@@ -1133,32 +1109,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               }
 
               appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
-              ctx.session = {
-                ...ctx.session,
-                status: "running",
-                activeTurnId: prepared.turnId,
-                updatedAt: yield* nowIso,
-                ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
-              };
-              const remainingPrompts = Math.max(0, ctx.promptsInFlight - 1);
-              ctx.promptsInFlight = remainingPrompts;
-
-              // Only the last remaining prompt settles the turn. A steer-
-              // superseded prompt resolving while another is in flight or
-              // pending must leave the merged turn running.
-              if (
-                remainingPrompts === 0 &&
-                ctx.activeTurnId === prepared.turnId &&
-                ctx.session.activeTurnId === prepared.turnId
-              ) {
-                if (ctx.interruptedTurnIds.has(prepared.turnId)) {
-                  yield* Ref.set(promptSettled, true);
-                  return {
-                    threadId: input.threadId,
-                    turnId: prepared.turnId,
-                    resumeCursor: ctx.session.resumeCursor,
-                  };
-                }
+              ctx.inFlightTurnIds = ctx.inFlightTurnIds.filter((id) => id !== prepared.turnId);
+              const completedStopReason = completedStopReasonFromPromptResponse(result);
+              // Each prompt settles its own turn. When turns are queued behind
+              // it (steers), the session keeps running on the newest turn;
+              // ingestion rejects lifecycle changes from a non-active turn, so
+              // completing turn N here cannot flip the session ready while
+              // turn N+1 is still in flight.
+              if (ctx.inFlightTurnIds.length === 0) {
                 const completedAt = yield* nowIso;
                 const { activeTurnId: _completedTurnId, ...readySession } = ctx.session;
                 ctx.activeTurnId = undefined;
@@ -1168,23 +1126,27 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   updatedAt: completedAt,
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
-                const completedStopReason = completedStopReasonFromPromptResponse(result);
-                yield* offerRuntimeEvent({
-                  type: "turn.completed",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId: prepared.turnId,
-                  payload: {
-                    state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                    stopReason: completedStopReason,
-                  },
-                });
-                ctx.interruptedTurnIds.delete(prepared.turnId);
-                yield* Ref.set(promptSettled, true);
-              } else if (remainingPrompts > 0) {
-                yield* Ref.set(promptSettled, true);
+              } else {
+                ctx.session = {
+                  ...ctx.session,
+                  status: "running",
+                  updatedAt: yield* nowIso,
+                  ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
+                };
               }
+              yield* offerRuntimeEvent({
+                type: "turn.completed",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                payload: {
+                  state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                  stopReason: completedStopReason,
+                },
+              });
+              ctx.interruptedTurnIds.delete(prepared.turnId);
+              yield* Ref.set(promptSettled, true);
 
               return {
                 threadId: input.threadId,
@@ -1224,11 +1186,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     if (ctx.interruptedTurnIds.has(prepared.turnId)) {
                       return;
                     }
-                    if (
-                      ctx.promptsInFlight <= 0 ||
-                      ctx.activeTurnId !== prepared.turnId ||
-                      ctx.session.activeTurnId !== prepared.turnId
-                    ) {
+                    if (!ctx.inFlightTurnIds.includes(prepared.turnId)) {
                       return;
                     }
                     appendPromptResultToTurn(
@@ -1281,6 +1239,12 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           if (interruptedTurnId !== undefined) {
             ctx.interruptedTurnIds.add(interruptedTurnId);
           }
+          // Stop drops the whole queue: turns superseded by a steer are already
+          // settled in the projector, but their prompts may still resolve
+          // wire-side and must not resurrect.
+          for (const inFlightTurnId of ctx.inFlightTurnIds) {
+            ctx.interruptedTurnIds.add(inFlightTurnId);
+          }
           return {
             _tag: "Proceed" as const,
             acpSessionId: ctx.acpSessionId,
@@ -1322,17 +1286,20 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             );
             if (interruptedTurnId) {
               ctx.interruptedTurnIds.add(interruptedTurnId);
+              for (const inFlightTurnId of ctx.inFlightTurnIds) {
+                ctx.interruptedTurnIds.add(inFlightTurnId);
+              }
               yield* settlePromptInFlight(threadId, interruptedTurnId, ctx.acpSessionId, {
                 completedStopReason: "cancelled",
                 settleAllPrompts: true,
               });
             } else if (
-              ctx.promptsInFlight > 0 ||
+              ctx.inFlightTurnIds.length > 0 ||
               ctx.session.status === "running" ||
               ctx.session.status === "connecting"
             ) {
               const updatedAt = yield* nowIso;
-              ctx.promptsInFlight = 0;
+              ctx.inFlightTurnIds = [];
               ctx.activeTurnId = undefined;
               const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
               ctx.session = {

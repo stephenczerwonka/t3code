@@ -40,6 +40,15 @@ const mockAgentCommand = process.execPath;
 
 async function makeMockDevinWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-mock-"));
+  if (process.platform === "win32") {
+    const wrapperPath = NodePath.join(dir, "fake-devin.cmd");
+    const envLines = Object.entries(extraEnv ?? {})
+      .map(([key, value]) => `set "${key}=${value}"`)
+      .join("\r\n");
+    const script = `@echo off\r\n${envLines ? `${envLines}\r\n` : ""}${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} %*\r\n`;
+    await NodeFSP.writeFile(wrapperPath, script, "utf8");
+    return wrapperPath;
+  }
   const wrapperPath = NodePath.join(dir, "fake-devin.sh");
   const envExports = Object.entries(extraEnv ?? {})
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
@@ -102,8 +111,7 @@ it("requires a settlement to match the live Devin turn", () => {
     devinPromptSettlementBelongsToContext({
       liveAcpSessionId: "session-1",
       expectedAcpSessionId: "session-1",
-      liveActiveTurnId: replacementTurnId,
-      liveSessionActiveTurnId: replacementTurnId,
+      inFlightTurnIds: [replacementTurnId],
       turnId: staleTurnId,
     }),
   );
@@ -111,8 +119,7 @@ it("requires a settlement to match the live Devin turn", () => {
     devinPromptSettlementBelongsToContext({
       liveAcpSessionId: "replacement-session",
       expectedAcpSessionId: "stale-session",
-      liveActiveTurnId: staleTurnId,
-      liveSessionActiveTurnId: staleTurnId,
+      inFlightTurnIds: [staleTurnId],
       turnId: staleTurnId,
     }),
   );
@@ -120,8 +127,7 @@ it("requires a settlement to match the live Devin turn", () => {
     devinPromptSettlementBelongsToContext({
       liveAcpSessionId: "session-1",
       expectedAcpSessionId: "session-1",
-      liveActiveTurnId: staleTurnId,
-      liveSessionActiveTurnId: staleTurnId,
+      inFlightTurnIds: [staleTurnId],
       turnId: staleTurnId,
     }),
   );
@@ -256,6 +262,10 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
 
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
+      // Windows delivers no POSIX signals: killing the cmd-shim child
+      // terminates cmd.exe (TerminateProcess), the node grandchild never runs
+      // its SIGTERM handler, and the exit log is never written.
+      if (process.platform === "win32") return;
       const threadId = ThreadId.make("devin-stop-session-close");
       const tempDir = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-adapter-exit-log-")),
@@ -694,6 +704,94 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       yield* Fiber.interrupt(runtimeEventsFiber);
       yield* adapter.stopSession(threadId);
     }),
+  );
+
+  it.effect("opens a new turn for a steer and settles each prompt on its own turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-steer-opens-new-turn");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-steer-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_PROMPT_DELAY_MS: "400",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const startedTurnIds: TurnId[] = [];
+      const bothTurnsStarted = yield* Deferred.make<void>();
+      const bothTurnsCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          runtimeEvents.push(event);
+          if (event.type === "turn.started" && event.turnId !== undefined) {
+            startedTurnIds.push(event.turnId);
+            if (startedTurnIds.length === 2) {
+              yield* Deferred.succeed(bothTurnsStarted, undefined).pipe(Effect.ignore);
+            }
+          }
+          if (
+            event.type === "turn.completed" &&
+            runtimeEvents.filter(
+              (entry) =>
+                entry.type === "turn.completed" && String(entry.threadId) === String(threadId),
+            ).length === 2
+          ) {
+            yield* Deferred.succeed(bothTurnsCompleted, undefined).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "first turn", attachments: [] })
+        .pipe(Effect.forkChild);
+      // Wait until the first prompt is on the wire, then steer mid-flight.
+      yield* waitForFileContent(requestLogPath, 80, '"method":"session/prompt"');
+      const secondSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "steer mid-flight", attachments: [] })
+        .pipe(Effect.forkChild);
+
+      yield* Deferred.await(bothTurnsStarted).pipe(Effect.timeout("4 seconds"));
+      assert.notEqual(String(startedTurnIds[0]), String(startedTurnIds[1]));
+
+      yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("4 seconds"));
+      yield* Fiber.join(secondSendTurnFiber).pipe(Effect.timeout("4 seconds"));
+      yield* Deferred.await(bothTurnsCompleted).pipe(Effect.timeout("4 seconds"));
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "turn.completed" }> =>
+          event.type === "turn.completed" && String(event.threadId) === String(threadId),
+      );
+      const readySessions = yield* adapter.listSessions();
+      const readySession = readySessions.find((session) => session.threadId === threadId);
+
+      assert.deepEqual(
+        turnCompletedEvents.map((event) => [String(event.turnId), event.payload.state]),
+        [
+          [String(startedTurnIds[0]), "completed"],
+          [String(startedTurnIds[1]), "completed"],
+        ],
+      );
+      assert.equal(readySession?.status, "ready");
+      assert.isUndefined(readySession?.activeTurnId);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
   );
 
   it.effect("restores a Devin session to ready when the prompt RPC fails", () =>
