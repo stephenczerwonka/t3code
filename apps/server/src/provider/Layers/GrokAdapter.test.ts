@@ -35,6 +35,15 @@ const mockAgentCommand = process.execPath;
 
 async function makeMockGrokWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-mock-"));
+  if (process.platform === "win32") {
+    const wrapperPath = NodePath.join(dir, "fake-grok.cmd");
+    const envLines = Object.entries(extraEnv ?? {})
+      .map(([key, value]) => `set "${key}=${value}"`)
+      .join("\r\n");
+    const script = `@echo off\r\n${envLines ? `${envLines}\r\n` : ""}${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} %*\r\n`;
+    await NodeFSP.writeFile(wrapperPath, script, "utf8");
+    return wrapperPath;
+  }
   const wrapperPath = NodePath.join(dir, "fake-grok.sh");
   const envExports = Object.entries(extraEnv ?? {})
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
@@ -190,6 +199,10 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
+      // Windows delivers no POSIX signals: killing the cmd-shim child
+      // terminates cmd.exe (TerminateProcess), the node grandchild never runs
+      // its SIGTERM handler, and the exit log is never written.
+      if (process.platform === "win32") return;
       const threadId = ThreadId.make("grok-stop-session-close");
       const tempDir = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-adapter-exit-log-")),

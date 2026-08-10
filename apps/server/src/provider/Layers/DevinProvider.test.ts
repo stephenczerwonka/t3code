@@ -14,6 +14,13 @@ import {
 
 const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
+/** The POSIX fake is an extensionless sh script; Windows gets an executable .cmd. */
+function fakeDevinBinary(shLines: ReadonlyArray<string>, cmdLines: ReadonlyArray<string>) {
+  return process.platform === "win32"
+    ? { fileName: "devin.cmd", content: `@echo off\r\n${cmdLines.join("\r\n")}\r\n` }
+    : { fileName: "devin", content: `#!/bin/sh\n${shLines.join("\n")}\n` };
+}
+
 describe("buildInitialDevinProviderSnapshot", () => {
   it.effect("returns a disabled snapshot when settings.enabled is false", () =>
     Effect.gen(function* () {
@@ -79,11 +86,12 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-devin-version-" });
-          const devinPath = path.join(dir, "devin");
-          yield* fs.writeFileString(
-            devinPath,
-            ["#!/bin/sh", `printf "%s\\n" "${secretStderr}" >&2`, "exit 2", ""].join("\n"),
+          const fake = fakeDevinBinary(
+            [`printf "%s\\n" "${secretStderr}" >&2`, "exit 2"],
+            [`echo ${secretStderr} 1>&2`, "exit /b 2"],
           );
+          const devinPath = path.join(dir, fake.fileName);
+          yield* fs.writeFileString(devinPath, fake.content);
           yield* fs.chmod(devinPath, 0o755);
 
           return yield* checkDevinProviderStatus(
@@ -107,11 +115,12 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-devin-nokey-" });
-          const devinPath = path.join(dir, "devin");
-          yield* fs.writeFileString(
-            devinPath,
-            ["#!/bin/sh", 'printf "devin 2026.8.18\\n"', "exit 0", ""].join("\n"),
+          const fake = fakeDevinBinary(
+            ['printf "devin 2026.8.18\\n"', "exit 0"],
+            ["echo devin 2026.8.18", "exit /b 0"],
           );
+          const devinPath = path.join(dir, fake.fileName);
+          yield* fs.writeFileString(devinPath, fake.content);
           yield* fs.chmod(devinPath, 0o755);
 
           return yield* checkDevinProviderStatus(
@@ -136,20 +145,26 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-devin-success-" });
-          const devinPath = path.join(dir, "devin");
-          yield* fs.writeFileString(
-            devinPath,
+          const fake = fakeDevinBinary(
             [
-              "#!/bin/sh",
               'if [ "$1" = "--version" ]; then',
               '  printf "devin 2026.8.18\\n"',
               "else",
               `  printf '%s\\n' '{"families":[{"variants":[{"model_uid":"claude-sonnet-5-high","label":"Claude Sonnet 5 High"}]}]}'`,
               "fi",
               "exit 0",
-              "",
-            ].join("\n"),
+            ],
+            [
+              'if "%~1"=="--version" (',
+              "  echo devin 2026.8.18",
+              ") else (",
+              '  echo {"families":[{"variants":[{"model_uid":"claude-sonnet-5-high","label":"Claude Sonnet 5 High"}]}]}',
+              ")",
+              "exit /b 0",
+            ],
           );
+          const devinPath = path.join(dir, fake.fileName);
+          yield* fs.writeFileString(devinPath, fake.content);
           yield* fs.chmod(devinPath, 0o755);
 
           return yield* checkDevinProviderStatus(

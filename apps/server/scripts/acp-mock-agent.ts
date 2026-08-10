@@ -281,6 +281,8 @@ function modeState(): AcpSchema.SessionModeState {
 const grokAcpModels: ReadonlyArray<AcpSchema.ModelInfo> = [
   { modelId: "grok-build", name: "Grok Build" },
   { modelId: "grok-mock-alt", name: "Grok Mock Alt" },
+  { modelId: "devin-build", name: "Devin Build" },
+  { modelId: "devin-mock-alt", name: "Devin Mock Alt" },
 ];
 
 function modelState(): AcpSchema.SessionModelState {
