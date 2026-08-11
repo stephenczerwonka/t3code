@@ -158,6 +158,7 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
+  TriangleAlertIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
@@ -4365,6 +4366,29 @@ function ChatViewContent(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  // A turn that failed (transport error, provider crash, machine slept under
+  // it) looks dead-ended, but the provider session survives with its resume
+  // cursor — the composer already continues it. Say so and offer a focus
+  // shortcut; the banner clears itself once a new turn is running.
+  const failedTurnBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    const sessionStatus = activeThread?.session?.status;
+    const turnInFlight = sessionStatus === "starting" || sessionStatus === "running";
+    if (activeThread?.latestTurn?.state !== "error" || turnInFlight) {
+      return null;
+    }
+    return {
+      id: `turn-failed:${activeThread.id}:${activeThread.latestTurn.turnId}`,
+      variant: "info",
+      icon: <TriangleAlertIcon />,
+      title: "The last turn failed before it finished",
+      description: "The session can be resumed — send a message to continue where it left off.",
+      actions: (
+        <Button size="xs" variant="outline" onClick={focusComposer}>
+          Continue
+        </Button>
+      ),
+    };
+  }, [activeThread?.id, activeThread?.latestTurn, activeThread?.session?.status, focusComposer]);
   // The stack renders items[0] front-most and tucks the rest behind hover, so
   // ordering is priority: urgent system banners (error/warning variants plus
   // calm-styled live states flagged `urgent`, like update progress), then
@@ -4427,12 +4451,14 @@ function ChatViewContent(props: ChatViewProps) {
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const failedTurnItems = failedTurnBannerItem === null ? [] : [failedTurnBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
         ...backgroundLivenessItems,
+        ...failedTurnItems,
         ...calmSystemItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
@@ -4441,6 +4467,7 @@ function ChatViewContent(props: ChatViewProps) {
     return [
       ...urgentSystemItems,
       ...backgroundLivenessItems,
+      ...failedTurnItems,
       ...calmSystemItems,
       ...wokeThreadItems,
       {
@@ -4487,6 +4514,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    failedTurnBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
