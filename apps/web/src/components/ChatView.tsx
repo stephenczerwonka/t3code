@@ -4092,12 +4092,18 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
   const activeThreadSettled = useMemo(() => {
     if (activeThreadShell === null || !supportsSettlement) return false;
+    // The shell entry can lag the open detail view right after navigation; a
+    // session the detail view reports as live must win, or the banner flashes
+    // "settled" over a turn that is visibly running.
+    const detailSessionStatus = activeThread?.session?.status;
+    if (detailSessionStatus === "starting" || detailSessionStatus === "running") return false;
     return effectiveSettled(activeThreadShell, {
       now: `${nowMinute}:00.000Z`,
       autoSettleAfterDays,
       changeRequestState: activeThreadPr?.state ?? null,
     });
   }, [
+    activeThread?.session?.status,
     activeThreadPr?.state,
     activeThreadShell,
     autoSettleAfterDays,
