@@ -22,6 +22,22 @@ export const environmentShellSummaryAtom = createEnvironmentShellSummaryAtom({
   shellStateValueAtom: environmentShell.stateValueAtom,
 });
 
+export const anyTurnRunningAtom = Atom.make((get) => {
+  for (const environmentId of get(environmentCatalog.catalogValueAtom).entries.keys()) {
+    const shell = get(environmentShell.stateValueAtom(environmentId));
+    if (Option.isNone(shell.snapshot)) {
+      continue;
+    }
+    for (const thread of shell.snapshot.value.threads) {
+      const status = thread.session?.status;
+      if (status === "starting" || status === "running") {
+        return true;
+      }
+    }
+  }
+  return false;
+}).pipe(Atom.withLabel("web-any-turn-running"));
+
 export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
   if (Option.isNone(catalog)) {

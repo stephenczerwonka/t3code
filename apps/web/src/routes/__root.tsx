@@ -40,7 +40,7 @@ import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
 import { resolveInitialServerAuthGateState } from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
-import { shellEnvironment } from "../state/shell";
+import { shellEnvironment, anyTurnRunningAtom } from "../state/shell";
 import { useAtomValue } from "@effect/atom-react";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
@@ -138,6 +138,7 @@ function RootRouteView() {
         <SlowRpcRequestToastCoordinator />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
+        {primaryEnvironmentAuthenticated ? <TurnActivityPowerBlock /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {appShell}
         {/* Above the router: a theme draft is judged by walking the app, so the
@@ -186,6 +187,25 @@ function FontAppearanceSync() {
     fontSizePrompt,
     fontSmoothing,
   ]);
+
+  return null;
+}
+
+/**
+ * Desktop only: while any turn is running, ask the Electron shell to hold a
+ * powerSaveBlocker so locking the machine or closing the lid cannot suspend
+ * in-flight agent work. No bridge (web/mobile) renders this as a no-op.
+ */
+function TurnActivityPowerBlock() {
+  const turnRunning = useAtomValue(anyTurnRunningAtom);
+
+  useEffect(() => {
+    const bridge = window.desktopBridge;
+    if (!bridge) {
+      return;
+    }
+    bridge.setTurnActivity(turnRunning).catch(() => undefined);
+  }, [turnRunning]);
 
   return null;
 }
