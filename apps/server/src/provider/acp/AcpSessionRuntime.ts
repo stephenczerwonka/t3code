@@ -57,6 +57,50 @@ const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
  */
 const defaultPromptIdleTimeout = Duration.minutes(10);
 const promptIdlePollInterval = Duration.seconds(1);
+/**
+ * A tick gap beyond this means the machine was suspended (timers froze while
+ * the wall clock kept running), not that the event loop stalled.
+ */
+const promptIdleSuspensionGapThreshold = Duration.seconds(30);
+
+/**
+ * Reconciles idle time across system suspension. A suspended machine freezes
+ * timers while the wall clock jumps forward, so a naive `now - lastActivity`
+ * fires the idle timeout on the first tick after wake — precisely when the
+ * agent is about to resume. When the gap between watchdog ticks exceeds the
+ * suspension threshold and the last activity predates the gap, shift the
+ * activity baseline forward by the suspended span so only awake time counts
+ * as silence. Returns the shifted baseline when suspension was detected so
+ * the caller can persist it.
+ */
+export function discountSuspendedIdleTime(input: {
+  readonly nowMillis: number;
+  readonly lastTickAtMillis: number;
+  readonly lastActivityAtMillis: number;
+  readonly pollIntervalMillis: number;
+  readonly suspensionGapThresholdMillis: number;
+}): {
+  readonly effectiveIdleMillis: number;
+  readonly shiftedActivityAtMillis: number | undefined;
+} {
+  const tickGapMillis = input.nowMillis - input.lastTickAtMillis;
+  const gapStartedAtMillis = input.nowMillis - tickGapMillis;
+  if (
+    tickGapMillis > input.suspensionGapThresholdMillis &&
+    input.lastActivityAtMillis < gapStartedAtMillis
+  ) {
+    const shiftedActivityAtMillis =
+      input.lastActivityAtMillis + (tickGapMillis - input.pollIntervalMillis);
+    return {
+      effectiveIdleMillis: input.nowMillis - shiftedActivityAtMillis,
+      shiftedActivityAtMillis,
+    };
+  }
+  return {
+    effectiveIdleMillis: input.nowMillis - input.lastActivityAtMillis,
+    shiftedActivityAtMillis: undefined,
+  };
+}
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -331,19 +375,31 @@ export const make = (
      */
     const waitForPromptIdleTimeout = Effect.gen(function* () {
       const idleTimeoutMillis = Duration.toMillis(promptIdleTimeout);
+      let lastTickAtMillis = yield* Clock.currentTimeMillis;
       while (true) {
         yield* Effect.sleep(promptIdlePollInterval);
+        const nowMillis = yield* Clock.currentTimeMillis;
         const lastActivityAtMillis = yield* Ref.get(lastAgentActivityAtMillisRef);
+        lastTickAtMillis = nowMillis;
         if (lastActivityAtMillis === undefined) {
           continue;
         }
-        const nowMillis = yield* Clock.currentTimeMillis;
-        const idleMillis = nowMillis - lastActivityAtMillis;
-        if (idleMillis >= idleTimeoutMillis) {
+        const discounted = discountSuspendedIdleTime({
+          nowMillis,
+          lastTickAtMillis,
+          lastActivityAtMillis,
+          pollIntervalMillis: Duration.toMillis(promptIdlePollInterval),
+          suspensionGapThresholdMillis: Duration.toMillis(promptIdleSuspensionGapThreshold),
+        });
+        if (discounted.shiftedActivityAtMillis !== undefined) {
+          yield* Ref.set(lastAgentActivityAtMillisRef, discounted.shiftedActivityAtMillis);
+          continue;
+        }
+        if (discounted.effectiveIdleMillis >= idleTimeoutMillis) {
           return yield* new EffectAcpErrors.AcpTransportError({
             operation: "call-rpc",
             method: "session/prompt",
-            detail: `session/prompt saw no agent activity for ${Math.round(idleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
+            detail: `session/prompt saw no agent activity for ${Math.round(discounted.effectiveIdleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
             cause: undefined,
           });
         }

@@ -23,6 +23,59 @@ const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.
 const mockAgentCommand = "node";
 const mockAgentArgs = [mockAgentPath];
 
+describe("discountSuspendedIdleTime", () => {
+  const base = {
+    pollIntervalMillis: 1_000,
+    suspensionGapThresholdMillis: 30_000,
+  };
+
+  it("counts idle normally when ticks are regular", () => {
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 100_000,
+      lastTickAtMillis: 99_000,
+      lastActivityAtMillis: 40_000,
+    });
+    expect(result.effectiveIdleMillis).toBe(60_000);
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+  });
+
+  it("discounts a suspended gap so the idle timeout cannot fire on wake", () => {
+    // 99 minutes between ticks (machine asleep), activity just before sleep.
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 10_000_000,
+      lastTickAtMillis: 4_000_000,
+      lastActivityAtMillis: 3_999_500,
+    });
+    expect(result.shiftedActivityAtMillis).toBe(3_999_500 + (6_000_000 - 1_000));
+    expect(result.effectiveIdleMillis).toBe(1_500);
+  });
+
+  it("does not shift a baseline refreshed after the gap", () => {
+    // Activity arrived during/after the gap (post-wake): keep it untouched.
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 10_000_000,
+      lastTickAtMillis: 4_000_000,
+      lastActivityAtMillis: 9_999_000,
+    });
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+    expect(result.effectiveIdleMillis).toBe(1_000);
+  });
+
+  it("treats a gap at the threshold as a stall, not a suspension", () => {
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 130_000,
+      lastTickAtMillis: 100_000,
+      lastActivityAtMillis: 0,
+    });
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+    expect(result.effectiveIdleMillis).toBe(130_000);
+  });
+});
+
 describe("AcpSessionRuntime", () => {
   it.effect("merges custom initialize client capabilities into the ACP handshake", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
