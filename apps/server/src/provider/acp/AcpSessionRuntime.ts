@@ -56,12 +56,21 @@ const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
  * way for a caller to observe it. This bounds *inactivity*, not turn length.
  */
 const defaultPromptIdleTimeout = Duration.minutes(10);
+const defaultToolCallIdleTimeout = Duration.minutes(10);
 const promptIdlePollInterval = Duration.seconds(1);
 /**
  * A tick gap beyond this means the machine was suspended (timers froze while
  * the wall clock kept running), not that the event loop stalled.
  */
 const promptIdleSuspensionGapThreshold = Duration.seconds(30);
+
+export function selectPromptIdleTimeout(input: {
+  readonly promptIdleTimeout: Duration.Duration;
+  readonly toolCallIdleTimeout: Duration.Duration;
+  readonly activeToolCallCount: number;
+}): Duration.Duration {
+  return input.activeToolCallCount > 0 ? input.toolCallIdleTimeout : input.promptIdleTimeout;
+}
 
 /**
  * Reconciles idle time across system suspension. A suspended machine freezes
@@ -121,6 +130,7 @@ export interface AcpSessionRuntimeOptions {
    * {@link defaultPromptIdleTimeout}.
    */
   readonly promptIdleTimeout?: Duration.Input;
+  readonly toolCallIdleTimeout?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
@@ -367,6 +377,9 @@ export const make = (
     const promptIdleTimeout = Duration.fromInputUnsafe(
       options.promptIdleTimeout ?? defaultPromptIdleTimeout,
     );
+    const toolCallIdleTimeout = Duration.fromInputUnsafe(
+      options.toolCallIdleTimeout ?? defaultToolCallIdleTimeout,
+    );
 
     /**
      * Fails once the agent has been silent for longer than the idle timeout.
@@ -374,19 +387,19 @@ export const make = (
      * as an error instead of pending forever.
      */
     const waitForPromptIdleTimeout = Effect.gen(function* () {
-      const idleTimeoutMillis = Duration.toMillis(promptIdleTimeout);
       let lastTickAtMillis = yield* Clock.currentTimeMillis;
       while (true) {
         yield* Effect.sleep(promptIdlePollInterval);
         const nowMillis = yield* Clock.currentTimeMillis;
-        const lastActivityAtMillis = yield* Ref.get(lastAgentActivityAtMillisRef);
+        const previousTickAtMillis = lastTickAtMillis;
         lastTickAtMillis = nowMillis;
+        const lastActivityAtMillis = yield* Ref.get(lastAgentActivityAtMillisRef);
         if (lastActivityAtMillis === undefined) {
           continue;
         }
         const discounted = discountSuspendedIdleTime({
           nowMillis,
-          lastTickAtMillis,
+          lastTickAtMillis: previousTickAtMillis,
           lastActivityAtMillis,
           pollIntervalMillis: Duration.toMillis(promptIdlePollInterval),
           suspensionGapThresholdMillis: Duration.toMillis(promptIdleSuspensionGapThreshold),
@@ -395,11 +408,23 @@ export const make = (
           yield* Ref.set(lastAgentActivityAtMillisRef, discounted.shiftedActivityAtMillis);
           continue;
         }
+        const activeToolCallCount = (yield* Ref.get(toolCallsRef)).size;
+        const idleTimeoutMillis = Duration.toMillis(
+          selectPromptIdleTimeout({
+            promptIdleTimeout,
+            toolCallIdleTimeout,
+            activeToolCallCount,
+          }),
+        );
         if (discounted.effectiveIdleMillis >= idleTimeoutMillis) {
+          const activity =
+            activeToolCallCount > 0
+              ? ` while ${activeToolCallCount} tool call${activeToolCallCount === 1 ? "" : "s"} remained active`
+              : "";
           return yield* new EffectAcpErrors.AcpTransportError({
             operation: "call-rpc",
             method: "session/prompt",
-            detail: `session/prompt saw no agent activity for ${Math.round(discounted.effectiveIdleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
+            detail: `session/prompt saw no agent activity${activity} for ${Math.round(discounted.effectiveIdleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
             cause: undefined,
           });
         }

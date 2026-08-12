@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
 import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -73,6 +74,25 @@ describe("discountSuspendedIdleTime", () => {
     });
     expect(result.shiftedActivityAtMillis).toBeUndefined();
     expect(result.effectiveIdleMillis).toBe(130_000);
+  });
+
+  it("uses a shorter timeout while tool calls remain active", () => {
+    const promptIdleTimeout = Duration.minutes(60);
+    const toolCallIdleTimeout = Duration.minutes(10);
+    expect(
+      AcpSessionRuntime.selectPromptIdleTimeout({
+        promptIdleTimeout,
+        toolCallIdleTimeout,
+        activeToolCallCount: 0,
+      }),
+    ).toEqual(promptIdleTimeout);
+    expect(
+      AcpSessionRuntime.selectPromptIdleTimeout({
+        promptIdleTimeout,
+        toolCallIdleTimeout,
+        activeToolCallCount: 3,
+      }),
+    ).toEqual(toolCallIdleTimeout);
   });
 });
 

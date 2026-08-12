@@ -9,6 +9,7 @@ import {
   hasDevinCredentials,
   resolveDevinAuthMethod,
   resolveDevinAcpBaseModelId,
+  resolveDevinPermissionMode,
   resolveDevinPromptIdleTimeout,
 } from "./DevinAcpSupport.ts";
 
@@ -49,6 +50,20 @@ describe("buildDevinAcpSpawnInput", () => {
     expect(spawn.command).toBe("devin");
     expect(spawn.args).toEqual(["acp"]);
   });
+
+  it("starts Devin in the native permission mode matching T3", () => {
+    const spawn = buildDevinAcpSpawnInput(
+      null,
+      "/tmp/project",
+      { EXISTING: "value", DEVIN_PERMISSION_MODE: "auto" },
+      undefined,
+      "full-access",
+    );
+    expect(spawn.env).toEqual({
+      EXISTING: "value",
+      DEVIN_PERMISSION_MODE: "dangerous",
+    });
+  });
 });
 
 describe("hasDevinCredentials", () => {
@@ -57,6 +72,15 @@ describe("hasDevinCredentials", () => {
     expect(hasDevinCredentials({ apiKey: "" }, { WINDSURF_API_KEY: "key" })).toBe(true);
     expect(hasDevinCredentials({ apiKey: "  " }, { WINDSURF_API_KEY: "  " })).toBe(false);
     expect(hasDevinCredentials(null, undefined)).toBe(false);
+  });
+});
+
+describe("resolveDevinPermissionMode", () => {
+  it("maps T3 runtime modes to native Devin permission modes", () => {
+    expect(resolveDevinPermissionMode("approval-required")).toBe("auto");
+    expect(resolveDevinPermissionMode("auto-accept-edits")).toBe("accept-edits");
+    expect(resolveDevinPermissionMode("auto")).toBe("smart");
+    expect(resolveDevinPermissionMode("full-access")).toBe("dangerous");
   });
 });
 

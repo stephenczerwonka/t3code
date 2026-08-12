@@ -1,4 +1,4 @@
-import { type DevinSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { type DevinSettings, ProviderDriverKind, type RuntimeMode } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -16,6 +16,7 @@ const DEVIN_AUTH_METHOD_BROWSER = "devin-browser";
 const DEVIN_AUTH_METHOD_API_KEY = "windsurf-api-key";
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
 const DEVIN_DEFAULT_MODEL_ID = "adaptive";
+const DEVIN_PERMISSION_MODE_ENV = "DEVIN_PERMISSION_MODE";
 /**
  * Devin turns execute remotely and can emit no `session/update` for far longer
  * than a local CLI agent while the cloud session works; the shared 10-minute
@@ -34,6 +35,7 @@ interface DevinAcpRuntimeInput extends Omit<
   readonly devinSettings: DevinAcpRuntimeDevinSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
   readonly model?: string;
+  readonly runtimeMode?: RuntimeMode;
 }
 
 export function buildDevinAcpSpawnInput(
@@ -41,12 +43,18 @@ export function buildDevinAcpSpawnInput(
   cwd: string,
   environment?: NodeJS.ProcessEnv,
   model?: string,
+  runtimeMode?: RuntimeMode,
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: devinSettings?.binaryPath || "devin",
     args: ["acp", ...(model ? ["--model", model] : [])],
     cwd,
-    env: { ...environment },
+    env: {
+      ...environment,
+      ...(runtimeMode
+        ? { [DEVIN_PERMISSION_MODE_ENV]: resolveDevinPermissionMode(runtimeMode) }
+        : {}),
+    },
   };
 }
 
@@ -62,6 +70,19 @@ export function hasDevinCredentials(
   environment: NodeJS.ProcessEnv | undefined,
 ): boolean {
   return Boolean(devinSettings?.apiKey?.trim() || environment?.[DEVIN_API_KEY_ENV]?.trim());
+}
+
+export function resolveDevinPermissionMode(runtimeMode: RuntimeMode): string {
+  switch (runtimeMode) {
+    case "approval-required":
+      return "auto";
+    case "auto-accept-edits":
+      return "accept-edits";
+    case "auto":
+      return "smart";
+    case "full-access":
+      return "dangerous";
+  }
 }
 
 function resolveDevinAuthenticateMeta(
@@ -107,7 +128,13 @@ export const makeDevinAcpRuntime = (
       AcpSessionRuntime.layer({
         ...input,
         promptIdleTimeout: resolveDevinPromptIdleTimeout(input.promptIdleTimeout),
-        spawn: buildDevinAcpSpawnInput(input.devinSettings, input.cwd, environment, input.model),
+        spawn: buildDevinAcpSpawnInput(
+          input.devinSettings,
+          input.cwd,
+          environment,
+          input.model,
+          input.runtimeMode,
+        ),
         authMethodId: resolveDevinAuthMethod,
         ...(authenticateMeta ? { authenticateMeta } : {}),
       }).pipe(
