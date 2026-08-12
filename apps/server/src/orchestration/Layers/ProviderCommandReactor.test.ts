@@ -150,6 +150,8 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly projectedSessionBeforeStart?: "starting" | "running";
+    readonly liveSessionBeforeStart?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -167,6 +169,18 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
+    if (input?.liveSessionBeforeStart === true) {
+      runtimeSessions.push({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: modelSelection.instanceId,
+        status: "running",
+        runtimeMode: "approval-required",
+        model: modelSelection.model,
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
     const startSessionEffect = input?.startSessionEffect;
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
@@ -449,6 +463,26 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
+    if (input?.projectedSessionBeforeStart !== undefined) {
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-before-reactor-start"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: input.projectedSessionBeforeStart,
+            providerName: "codex",
+            providerInstanceId: modelSelection.instanceId,
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-before-reactor-start"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+    }
     if (input?.titleRegenerationBeforeStart === "two") {
       await Effect.runPromise(
         engine.dispatch({
@@ -906,6 +940,44 @@ describe("ProviderCommandReactor", () => {
       "opening-context-image",
       "recent-context-image",
     ]);
+  });
+
+  it.each(["starting", "running"] as const)(
+    "interrupts an unowned %s session left projected across reactor startup",
+    async (status) => {
+      const harness = await createHarness({ projectedSessionBeforeStart: status });
+
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session).toMatchObject({
+        status: "interrupted",
+        activeTurnId: null,
+        providerName: "codex",
+        runtimeMode: "approval-required",
+      });
+      const events = Array.from(
+        await harness.runEffect(Stream.runCollect(harness.engine.readEvents(0, 100))),
+      );
+      expect(events.filter((event) => event.type === "thread.session-set")).toHaveLength(2);
+    },
+  );
+
+  it("keeps a projected running session when a live provider still owns it", async () => {
+    const harness = await createHarness({
+      projectedSessionBeforeStart: "running",
+      liveSessionBeforeStart: true,
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session).toMatchObject({
+      status: "running",
+      activeTurnId: asTurnId("turn-before-reactor-start"),
+    });
+    const events = Array.from(
+      await harness.runEffect(Stream.runCollect(harness.engine.readEvents(0, 100))),
+    );
+    expect(events.filter((event) => event.type === "thread.session-set")).toHaveLength(1);
   });
 
   it("clears title regeneration state left pending across reactor startup", async () => {
