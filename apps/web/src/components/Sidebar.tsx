@@ -130,6 +130,7 @@ import {
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   resolveWorkingStartedAt,
+  shouldPlaceThreadInSettledSection,
   sortLogicalProjectsForSidebar,
   sortPinnedThreadsForSidebar,
   sortSettledThreadsForSidebar,
@@ -1635,6 +1636,7 @@ export default function Sidebar() {
   );
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const threadLastVisitedAtById = useUiStateStore((s) => s.threadLastVisitedAtById);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
@@ -1909,7 +1911,18 @@ export default function Sidebar() {
         pinned.push(thread);
       } else if (
         supportsSettlement &&
-        effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
+        shouldPlaceThreadInSettledSection({
+          effectiveSettled: effectiveSettled(thread, {
+            now,
+            autoSettleAfterDays,
+            changeRequestState,
+          }),
+          explicitlySettled: thread.settledOverride === "settled",
+          thread: {
+            ...thread,
+            lastVisitedAt: threadLastVisitedAtById[threadKey],
+          },
+        })
       ) {
         settled.push(thread);
       } else {
@@ -1949,6 +1962,7 @@ export default function Sidebar() {
     scopedProjectKeys,
     serverConfigs,
     snoozeWakeTick,
+    threadLastVisitedAtById,
     threads,
   ]);
 

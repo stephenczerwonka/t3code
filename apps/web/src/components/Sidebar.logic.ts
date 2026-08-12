@@ -260,6 +260,14 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
+export function shouldPlaceThreadInSettledSection(input: {
+  readonly effectiveSettled: boolean;
+  readonly explicitlySettled: boolean;
+  readonly thread: ThreadStatusInput;
+}): boolean {
+  return input.effectiveSettled && (input.explicitlySettled || !hasUnseenCompletion(input.thread));
+}
+
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
