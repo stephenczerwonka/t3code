@@ -32,7 +32,7 @@ import { resolveDevinAcpBaseModelId } from "../acp/DevinAcpSupport.ts";
 const DEVIN_PRESENTATION = {
   displayName: "Devin",
   badgeLabel: "Early Access",
-  showInteractionModeToggle: false,
+  showInteractionModeToggle: true,
   requiresNewThreadForModelChange: true,
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({

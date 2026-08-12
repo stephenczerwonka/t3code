@@ -1,4 +1,9 @@
-import { type DevinSettings, ProviderDriverKind, type RuntimeMode } from "@t3tools/contracts";
+import {
+  type DevinSettings,
+  type ProviderInteractionMode,
+  ProviderDriverKind,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -10,6 +15,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import { collectSessionConfigOptionValues } from "./AcpRuntimeModel.ts";
 
 const DEVIN_API_KEY_ENV = "WINDSURF_API_KEY";
 const DEVIN_AUTH_METHOD_BROWSER = "devin-browser";
@@ -90,6 +96,72 @@ export function resolveDevinPermissionMode(runtimeMode: RuntimeMode): string {
       return "dangerous";
   }
 }
+
+const DEVIN_PLAN_MODE_ALIASES = ["plan", "architect"];
+const DEVIN_DEFAULT_MODE_ALIASES = ["normal", "code", "agent", "default", "chat", "implement"];
+
+function normalizeModeValue(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findModeValue(
+  values: ReadonlyArray<string>,
+  aliases: ReadonlyArray<string>,
+): string | undefined {
+  for (const alias of aliases) {
+    const exact = values.find((value) => normalizeModeValue(value) === alias);
+    if (exact) return exact;
+  }
+  for (const alias of aliases) {
+    const partial = values.find((value) => normalizeModeValue(value).includes(alias));
+    if (partial) return partial;
+  }
+  return undefined;
+}
+
+export function resolveDevinAcpInteractionMode(input: {
+  readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+  readonly interactionMode: ProviderInteractionMode | undefined;
+}):
+  | { readonly configId: string; readonly currentValue: string; readonly value: string }
+  | undefined {
+  if (input.interactionMode === undefined) return undefined;
+  const configOption = input.configOptions.find(
+    (option) => option.type === "select" && (option.id === "mode" || option.category === "mode"),
+  );
+  if (!configOption || configOption.type !== "select") return undefined;
+  const value = findModeValue(
+    collectSessionConfigOptionValues(configOption),
+    input.interactionMode === "plan" ? DEVIN_PLAN_MODE_ALIASES : DEVIN_DEFAULT_MODE_ALIASES,
+  );
+  return value === undefined
+    ? undefined
+    : { configId: configOption.id, currentValue: configOption.currentValue, value };
+}
+
+export const applyDevinAcpInteractionMode = Effect.fn("applyDevinAcpInteractionMode")(function* <
+  E,
+>(input: {
+  readonly runtime: Pick<
+    AcpSessionRuntime.AcpSessionRuntime["Service"],
+    "getConfigOptions" | "setConfigOption"
+  >;
+  readonly interactionMode: ProviderInteractionMode | undefined;
+  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
+}) {
+  const resolved = resolveDevinAcpInteractionMode({
+    configOptions: yield* input.runtime.getConfigOptions,
+    interactionMode: input.interactionMode,
+  });
+  if (!resolved || resolved.currentValue === resolved.value) return false;
+  yield* input.runtime
+    .setConfigOption(resolved.configId, resolved.value)
+    .pipe(Effect.mapError(input.mapError));
+  return true;
+});
 
 function resolveDevinAuthenticateMeta(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,

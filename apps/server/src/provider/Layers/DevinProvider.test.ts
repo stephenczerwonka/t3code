@@ -43,6 +43,7 @@ describe("buildInitialDevinProviderSnapshot", () => {
       expect(snapshot.version).toBeNull();
       expect(snapshot.message).toContain("Checking Devin");
       expect(snapshot.requiresNewThreadForModelChange).toBe(true);
+      expect(snapshot.showInteractionModeToggle).toBe(true);
     }),
   );
 });

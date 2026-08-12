@@ -2,14 +2,17 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
 
 import {
+  applyDevinAcpInteractionMode,
   applyDevinAcpModelSelection,
   buildDevinAcpSpawnInput,
   DEVIN_ACP_CLIENT_CAPABILITIES,
   hasDevinCredentials,
   resolveDevinAuthMethod,
   resolveDevinAcpBaseModelId,
+  resolveDevinAcpInteractionMode,
   resolveDevinPermissionMode,
   resolveDevinPromptIdleTimeout,
 } from "./DevinAcpSupport.ts";
@@ -95,6 +98,96 @@ describe("resolveDevinPermissionMode", () => {
   });
 });
 
+describe("Devin ACP interaction mode", () => {
+  const modeConfig = (
+    currentValue: string,
+    values: ReadonlyArray<string>,
+  ): ReadonlyArray<EffectAcpSchema.SessionConfigOption> => [
+    {
+      id: "mode",
+      name: "Mode",
+      category: "mode",
+      type: "select",
+      currentValue,
+      options: values.map((value) => ({ value, name: value })),
+    },
+  ];
+
+  it("resolves plan and default aliases from the negotiated mode config", () => {
+    const configOptions = modeConfig("ask", ["ask", "architect", "code"]);
+    expect(resolveDevinAcpInteractionMode({ configOptions, interactionMode: "plan" })).toEqual({
+      configId: "mode",
+      currentValue: "ask",
+      value: "architect",
+    });
+    expect(resolveDevinAcpInteractionMode({ configOptions, interactionMode: "default" })).toEqual({
+      configId: "mode",
+      currentValue: "ask",
+      value: "code",
+    });
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: modeConfig("normal", ["normal", "plan", "ask"]),
+        interactionMode: "default",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "normal", value: "normal" });
+  });
+
+  it("does not guess when the provider omits a compatible mode", () => {
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: modeConfig("ask", ["ask", "review"]),
+        interactionMode: "plan",
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveDevinAcpInteractionMode({ configOptions: [], interactionMode: "plan" }),
+    ).toBeUndefined();
+  });
+
+  it.effect("writes only actual negotiated mode changes", () =>
+    Effect.gen(function* () {
+      let currentValue = "normal";
+      const calls: Array<[string, string | boolean]> = [];
+      const runtime = {
+        getConfigOptions: Effect.sync(() => modeConfig(currentValue, ["normal", "plan", "ask"])),
+        setConfigOption: (configId: string, value: string | boolean) =>
+          Effect.sync(() => {
+            calls.push([configId, value]);
+            if (typeof value === "string") currentValue = value;
+            return { configOptions: modeConfig(currentValue, ["normal", "plan", "ask"]) };
+          }),
+      };
+
+      expect(
+        yield* applyDevinAcpInteractionMode({
+          runtime,
+          interactionMode: "plan",
+          mapError: (cause: EffectAcpErrors.AcpError) => cause,
+        }),
+      ).toBe(true);
+      expect(
+        yield* applyDevinAcpInteractionMode({
+          runtime,
+          interactionMode: "plan",
+          mapError: (cause: EffectAcpErrors.AcpError) => cause,
+        }),
+      ).toBe(false);
+      expect(
+        yield* applyDevinAcpInteractionMode({
+          runtime,
+          interactionMode: "default",
+          mapError: (cause: EffectAcpErrors.AcpError) => cause,
+        }),
+      ).toBe(true);
+      expect(calls).toEqual([
+        ["mode", "plan"],
+        ["mode", "normal"],
+      ]);
+    }),
+  );
+});
+
 describe("resolveDevinAuthMethod", () => {
   it("prefers the current browser method and supports the legacy API-key method", () => {
     expect(
@@ -132,7 +225,7 @@ describe("applyDevinAcpModelSelection", () => {
         runtime,
         currentModelId: "adaptive",
         requestedModelId: "swe-1-6-fast",
-        mapError: (cause) => cause.message,
+        mapError: (cause: EffectAcpErrors.AcpError) => cause.message,
       });
       expect(modelCalls).toEqual(["swe-1-6-fast"]);
       expect(result).toBe("swe-1-6-fast");
@@ -148,7 +241,7 @@ describe("applyDevinAcpModelSelection", () => {
         runtime,
         currentModelId: undefined,
         requestedModelId: "adaptive",
-        mapError: (cause) => cause.message,
+        mapError: (cause: EffectAcpErrors.AcpError) => cause.message,
       });
       expect(modelCalls).toEqual([]);
       expect(result).toBeUndefined();
@@ -162,7 +255,7 @@ describe("applyDevinAcpModelSelection", () => {
         runtime,
         currentModelId: "adaptive",
         requestedModelId: "adaptive",
-        mapError: (cause) => cause.message,
+        mapError: (cause: EffectAcpErrors.AcpError) => cause.message,
       });
       expect(modelCalls).toEqual([]);
       expect(result).toBe("adaptive");
@@ -177,7 +270,7 @@ describe("applyDevinAcpModelSelection", () => {
         runtime,
         currentModelId: "adaptive",
         requestedModelId: "swe-1-6-fast",
-        mapError: (cause) => cause.message,
+        mapError: (cause: EffectAcpErrors.AcpError) => cause.message,
       });
       expect(result).toBe("adaptive");
     }),
@@ -192,7 +285,7 @@ describe("applyDevinAcpModelSelection", () => {
           runtime,
           currentModelId: "adaptive",
           requestedModelId: "swe-1-6-fast",
-          mapError: (cause) => cause.message,
+          mapError: (cause: EffectAcpErrors.AcpError) => cause.message,
         }),
       );
       expect(error).toBe(failure.message);

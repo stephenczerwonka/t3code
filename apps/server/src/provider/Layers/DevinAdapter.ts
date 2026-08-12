@@ -63,6 +63,7 @@ import {
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  applyDevinAcpInteractionMode,
   applyDevinAcpModelSelection,
   currentDevinModelIdFromSessionSetup,
   makeDevinAcpRuntime,
@@ -120,6 +121,7 @@ interface DevinSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
+  readonly promptConfigurationSemaphore: Semaphore.Semaphore;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   /** Newest turn opened by sendTurn; mirrored into session.activeTurnId. */
@@ -597,6 +599,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
           const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
+          const promptConfigurationSemaphore = yield* Semaphore.make(1);
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
           yield* Effect.addFinalizer(() =>
@@ -886,6 +889,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
+            promptConfigurationSemaphore,
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
@@ -1064,7 +1068,6 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 mapError: (cause) =>
                   mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
               });
-
               const text = input.input?.trim();
               const imagePromptParts = yield* Effect.forEach(
                 input.attachments ?? [],
@@ -1155,6 +1158,8 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 acp: ctx.acp,
                 acpSessionId: ctx.acpSessionId,
                 displayModel,
+                interactionMode: input.interactionMode,
+                promptConfigurationSemaphore: ctx.promptConfigurationSemaphore,
                 promptParts,
                 turnId,
               };
@@ -1183,10 +1188,42 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         const promptFailureMessageRef = yield* Ref.make<string | undefined>(undefined);
 
         return yield* Effect.gen(function* () {
-          const result = yield* prepared.acp
-            .prompt({
-              prompt: prepared.promptParts,
-            })
+          const result = yield* prepared.promptConfigurationSemaphore
+            .withPermits(1)(
+              Effect.gen(function* () {
+                const liveCtx = sessions.get(input.threadId);
+                if (!liveCtx || liveCtx.acpSessionId !== prepared.acpSessionId) {
+                  return yield* new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: "Devin session changed before wire dispatch.",
+                  });
+                }
+                if (liveCtx.interruptedTurnIds.has(prepared.turnId)) {
+                  return { stopReason: "cancelled" } satisfies EffectAcpSchema.PromptResponse;
+                }
+                yield* applyDevinAcpInteractionMode({
+                  runtime: prepared.acp,
+                  interactionMode: prepared.interactionMode,
+                  mapError: (cause) =>
+                    mapAcpToAdapterError(
+                      PROVIDER,
+                      input.threadId,
+                      "session/set_config_option",
+                      cause,
+                    ),
+                });
+                return yield* prepared.acp
+                  .prompt({
+                    prompt: prepared.promptParts,
+                  })
+                  .pipe(
+                    Effect.mapError((error) =>
+                      mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+                    ),
+                  );
+              }),
+            )
             .pipe(
               Effect.tap((promptResult) =>
                 Effect.all([
@@ -1195,13 +1232,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 ]),
               ),
               Effect.tapError((error) =>
-                Ref.set(
-                  promptFailureMessageRef,
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
-                ).pipe(Effect.andThen(prepared.acp.drainEvents)),
-              ),
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+                Ref.set(promptFailureMessageRef, error.message).pipe(
+                  Effect.andThen(prepared.acp.drainEvents),
+                ),
               ),
             );
 

@@ -260,6 +260,77 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("applies negotiated plan and default modes before Devin prompts", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-interaction-mode");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-mode-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_FORCE_MODE_CONFIG: "1",
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "plan the change",
+        attachments: [],
+        interactionMode: "plan",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "refine the plan",
+        attachments: [],
+        interactionMode: "plan",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "implement the change",
+        attachments: [],
+        interactionMode: "default",
+      });
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const modeValues = requests.flatMap((entry) => {
+        if (entry.method !== "session/set_config_option") return [];
+        const params = entry.params;
+        if (!params || typeof params !== "object") return [];
+        const record = params as Record<string, unknown>;
+        return record.configId === "mode" && typeof record.value === "string" ? [record.value] : [];
+      });
+      assert.deepStrictEqual(modeValues, ["architect", "code"]);
+      const modeAndPromptSequence = requests.flatMap((entry) => {
+        if (entry.method === "session/prompt") return ["prompt"];
+        if (entry.method !== "session/set_config_option") return [];
+        const params = entry.params;
+        if (!params || typeof params !== "object") return [];
+        const record = params as Record<string, unknown>;
+        return record.configId === "mode" && typeof record.value === "string"
+          ? [`mode:${record.value}`]
+          : [];
+      });
+      assert.deepStrictEqual(modeAndPromptSequence, [
+        "mode:architect",
+        "prompt",
+        "prompt",
+        "mode:code",
+        "prompt",
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("handles current ACP form elicitation and returns typed answers", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-current-elicitation");
