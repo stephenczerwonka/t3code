@@ -18,8 +18,11 @@ interface ShellEnvironmentConfig {
   readonly userShell: Option.Option<string>;
 }
 
+type WindowsEnvironmentTarget = "Process" | "User" | "Machine";
+
 interface WindowsProbeOptions {
   readonly loadProfile: boolean;
+  readonly target: WindowsEnvironmentTarget;
 }
 
 const DesktopShellEnvironmentProbe = Schema.Literals([
@@ -238,13 +241,16 @@ const capturePosixEnvironmentCommand = (names: ReadonlyArray<string>) =>
     })
     .join("; ");
 
-const captureWindowsEnvironmentCommand = (names: ReadonlyArray<string>) =>
+const captureWindowsEnvironmentCommand = (
+  names: ReadonlyArray<string>,
+  target: WindowsEnvironmentTarget,
+) =>
   [
     "$ErrorActionPreference = 'Stop'",
     ...names.flatMap((name) => {
       return [
         `Write-Output '${startMarker(name)}'`,
-        `$value = [Environment]::GetEnvironmentVariable('${name}')`,
+        `$value = [Environment]::GetEnvironmentVariable('${name}', [EnvironmentVariableTarget]::${target})`,
         "if ($null -ne $value -and $value.Length -gt 0) { Write-Output $value }",
         `Write-Output '${endMarker(name)}'`,
       ];
@@ -355,7 +361,7 @@ const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEn
       ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
       "-NonInteractive",
       "-Command",
-      captureWindowsEnvironmentCommand(names),
+      captureWindowsEnvironmentCommand(names, options.target),
     ];
 
     for (const command of WINDOWS_SHELL_CANDIDATES) {
@@ -379,14 +385,23 @@ const installWindowsEnvironment = Effect.fn("desktop.shellEnvironment.installWin
   function* (
     config: ShellEnvironmentConfig,
   ): Effect.fn.Return<void, never, ChildProcessSpawner.ChildProcessSpawner> {
-    const noProfile = yield* readWindowsEnvironment(["PATH"], { loadProfile: false });
+    const userEnvironment = yield* readWindowsEnvironment(["PATH"], {
+      loadProfile: false,
+      target: "User",
+    });
+    const machineEnvironment = yield* readWindowsEnvironment(["PATH"], {
+      loadProfile: false,
+      target: "Machine",
+    });
     const profile = yield* readWindowsEnvironment(WINDOWS_PROFILE_ENV_NAMES, {
       loadProfile: true,
+      target: "Process",
     });
     const mergedPath = mergePaths("win32", [
       trimNonEmpty(profile.PATH),
+      trimNonEmpty(machineEnvironment.PATH),
+      trimNonEmpty(userEnvironment.PATH),
       trimNonEmpty(knownWindowsCliDirs(config.env).join(";")),
-      trimNonEmpty(noProfile.PATH),
       readEnvPath(config.env),
     ]);
 
