@@ -7,6 +7,7 @@ import type {
   ProviderApprovalDecision,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
+  ProviderUserInputAction,
   ProviderSession,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
@@ -153,6 +154,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       _threadId: ThreadId,
       _requestId: string,
       _answers: Record<string, unknown>,
+      _action?: ProviderUserInputAction,
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
@@ -895,6 +897,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         answers: {
           sandbox_mode: "workspace-write",
         },
+        action: "accept",
       });
       assert.deepEqual(routing.codex.respondToUserInput.mock.calls, [
         [
@@ -903,8 +906,18 @@ routing.layer("ProviderServiceLive routing", (it) => {
           {
             sandbox_mode: "workspace-write",
           },
+          "accept",
         ],
       ]);
+      const unsupportedAction = yield* Effect.flip(
+        provider.respondToUserInput({
+          threadId: session.threadId,
+          requestId: asRequestId("req-user-input-2"),
+          answers: {},
+          action: "decline",
+        }),
+      );
+      assert.equal(unsupportedAction._tag, "ProviderValidationError");
 
       yield* provider.rollbackConversation({
         threadId: session.threadId,

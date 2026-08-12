@@ -42,6 +42,15 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  CurrentAcpElicitationCreateRequest,
+  type CurrentAcpFormRequest,
+  isCurrentFormRequest,
+  makeCurrentAcpElicitationResponse,
+  makeLegacyAcpElicitationResponse,
+  mapAcpFormToUserInput,
+  normalizeAcpFormAnswers,
+} from "../acp/AcpElicitationCompatibility.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -83,12 +92,23 @@ interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
+type AcpFormRequest =
+  | CurrentAcpFormRequest
+  | Extract<EffectAcpSchema.ElicitationRequest, { readonly mode: "form" }>;
+
 type PendingUserInputResolution =
-  | { readonly _tag: "answered"; readonly answers: ProviderUserInputAnswers }
-  | { readonly _tag: "cancelled" };
+  | {
+      readonly action: "accept";
+      readonly answers: ProviderUserInputAnswers;
+      readonly content: Readonly<Record<string, EffectAcpSchema.ElicitationContentValue>>;
+    }
+  | { readonly action: "decline" | "cancel"; readonly answers: {} };
 
 interface PendingUserInput {
+  readonly request: AcpFormRequest;
   readonly resolution: Deferred.Deferred<PendingUserInputResolution>;
+  readonly completed: Deferred.Deferred<void>;
+  claimed: boolean;
 }
 
 interface DevinSessionContext {
@@ -127,11 +147,23 @@ function settlePendingApprovalsAsCancelled(
 }
 
 function settlePendingUserInputsAsCancelled(
-  pendingUserInputs: ReadonlyMap<ApprovalRequestId, PendingUserInput>,
+  pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>,
 ): Effect.Effect<void> {
   return Effect.forEach(
-    Array.from(pendingUserInputs.values()),
-    (pending) => Deferred.succeed(pending.resolution, { _tag: "cancelled" }).pipe(Effect.ignore),
+    Array.from(pendingUserInputs.entries()),
+    ([, pending]) =>
+      Effect.gen(function* () {
+        if (!pending.claimed) {
+          pending.claimed = true;
+          yield* Deferred.succeed(pending.resolution, { action: "cancel", answers: {} }).pipe(
+            Effect.ignore,
+          );
+        }
+        yield* Deferred.await(pending.completed).pipe(
+          Effect.timeoutOption("5 seconds"),
+          Effect.asVoid,
+        );
+      }),
     { discard: true },
   );
 }
@@ -620,6 +652,119 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             ),
           );
           const started = yield* Effect.gen(function* () {
+            const handleAcpFormRequest = Effect.fn("handleAcpFormRequest")(function* (
+              request: AcpFormRequest,
+              method: string,
+            ) {
+              yield* logNative(input.threadId, method, request);
+              const normalized = mapAcpFormToUserInput(request);
+              const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+              const runtimeRequestId = RuntimeRequestId.make(requestId);
+              const resolution = yield* Deferred.make<PendingUserInputResolution>();
+              const completed = yield* Deferred.make<void>();
+              const turnId = resolveSessionCallbackTurnId(sessions, input.threadId);
+              pendingUserInputs.set(requestId, { request, resolution, completed, claimed: false });
+              return yield* Effect.gen(function* () {
+                yield* offerRuntimeEvent({
+                  type: "user-input.requested",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId,
+                  requestId: runtimeRequestId,
+                  payload: {
+                    message: normalized.message,
+                    questions: normalized.questions,
+                    responseActions: ["decline", "cancel"],
+                    requiresReview: true,
+                  },
+                  raw: {
+                    source: "acp.jsonrpc",
+                    method,
+                    payload: request,
+                  },
+                });
+                const resolved = yield* Deferred.await(resolution);
+                yield* offerRuntimeEvent({
+                  type: "user-input.resolved",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId,
+                  requestId: runtimeRequestId,
+                  payload: {
+                    action: resolved.action,
+                    answers: resolved.answers,
+                  },
+                });
+                return resolved;
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => pendingUserInputs.delete(requestId)).pipe(
+                    Effect.andThen(Deferred.succeed(completed, undefined).pipe(Effect.ignore)),
+                  ),
+                ),
+              );
+            });
+
+            yield* acp.handleExtRequest(
+              "elicitation/create",
+              CurrentAcpElicitationCreateRequest,
+              (request) => {
+                if (!isCurrentFormRequest(request)) {
+                  return Effect.fail(
+                    EffectAcpErrors.AcpRequestError.invalidParams(
+                      "T3 Code supports form elicitation only.",
+                    ),
+                  );
+                }
+                const ctx = sessions.get(input.threadId);
+                if (!ctx || ("sessionId" in request && request.sessionId !== ctx.acpSessionId)) {
+                  return Effect.fail(
+                    EffectAcpErrors.AcpRequestError.invalidParams(
+                      "Elicitation session does not match the active Devin session.",
+                    ),
+                  );
+                }
+                return mapAcpCallbackFailure(
+                  handleAcpFormRequest(request, "elicitation/create"),
+                ).pipe(
+                  Effect.map((resolved) =>
+                    makeCurrentAcpElicitationResponse(
+                      resolved.action,
+                      resolved.action === "accept" ? resolved.content : {},
+                    ),
+                  ),
+                );
+              },
+            );
+            yield* acp.handleElicitation((request) => {
+              if (request.mode !== "form") {
+                return Effect.fail(
+                  EffectAcpErrors.AcpRequestError.invalidParams(
+                    "T3 Code supports form elicitation only.",
+                  ),
+                );
+              }
+              const ctx = sessions.get(input.threadId);
+              if (!ctx || request.sessionId !== ctx.acpSessionId) {
+                return Effect.fail(
+                  EffectAcpErrors.AcpRequestError.invalidParams(
+                    "Elicitation session does not match the active Devin session.",
+                  ),
+                );
+              }
+              return mapAcpCallbackFailure(
+                handleAcpFormRequest(request, "session/elicitation"),
+              ).pipe(
+                Effect.map((resolved) =>
+                  makeLegacyAcpElicitationResponse(
+                    resolved.action,
+                    resolved.action === "accept" ? resolved.content : {},
+                  ),
+                ),
+              );
+            });
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
@@ -1335,6 +1480,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       threadId,
       requestId,
       answers,
+      action = "accept",
     ) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
@@ -1342,11 +1488,28 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         if (!pending) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "session/user_input",
+            method: "elicitation/create",
             detail: `Unknown pending user-input request: ${requestId}`,
           });
         }
-        yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
+        const resolved: PendingUserInputResolution =
+          action === "accept"
+            ? {
+                action,
+                answers,
+                content: yield* normalizeAcpFormAnswers(pending.request, answers),
+              }
+            : { action, answers: {} };
+        if (pending.claimed) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "elicitation/create",
+            detail: `Unknown pending user-input request: ${requestId}`,
+          });
+        }
+        pending.claimed = true;
+        yield* Deferred.succeed(pending.resolution, resolved);
+        yield* Deferred.await(pending.completed);
       });
 
     const readThread: DevinAdapterShape["readThread"] = (threadId) =>
@@ -1404,7 +1567,10 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        userInputActions: ["accept", "decline", "cancel"],
+      },
       startSession,
       sendTurn,
       interruptTurn,

@@ -10,6 +10,7 @@ import type {
   OrchestrationThreadShell,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderUserInputAction,
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
@@ -54,7 +55,7 @@ export interface ThreadDetailScreenProps {
   readonly respondingApprovalId: ApprovalRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
   readonly activePendingUserInputDrafts: Record<string, PendingUserInputDraftAnswer>;
-  readonly activePendingUserInputAnswers: Record<string, string> | null;
+  readonly activePendingUserInputAnswers: Record<string, string | string[]> | null;
   readonly respondingUserInputId: ApprovalRequestId | null;
   readonly draftMessage: string;
   readonly draftAttachments: ReadonlyArray<DraftComposerImageAttachment>;
@@ -90,14 +91,14 @@ export interface ThreadDetailScreenProps {
   readonly onSelectUserInputOption: (
     requestId: ApprovalRequestId,
     questionId: string,
-    label: string,
+    optionValue: string,
   ) => void;
   readonly onChangeUserInputCustomAnswer: (
     requestId: ApprovalRequestId,
     questionId: string,
     customAnswer: string,
   ) => void;
-  readonly onSubmitUserInput: () => Promise<unknown>;
+  readonly onSubmitUserInput: (action?: ProviderUserInputAction) => Promise<unknown>;
   readonly showContent?: boolean;
 }
 

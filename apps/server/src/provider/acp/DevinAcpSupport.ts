@@ -25,6 +25,12 @@ const DEVIN_PERMISSION_MODE_ENV = "DEVIN_PERMISSION_MODE";
  */
 const DEVIN_PROMPT_IDLE_TIMEOUT = Duration.minutes(60);
 
+export const DEVIN_ACP_CLIENT_CAPABILITIES = {
+  elicitation: { form: {} },
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+} satisfies NonNullable<EffectAcpSchema.InitializeRequest["clientCapabilities"]>;
+
 type DevinAcpRuntimeDevinSettings = Pick<DevinSettings, "binaryPath" | "apiKey">;
 
 interface DevinAcpRuntimeInput extends Omit<
@@ -127,6 +133,7 @@ export const makeDevinAcpRuntime = (
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
+        clientCapabilities: DEVIN_ACP_CLIENT_CAPABILITIES,
         promptIdleTimeout: resolveDevinPromptIdleTimeout(input.promptIdleTimeout),
         spawn: buildDevinAcpSpawnInput(
           input.devinSettings,

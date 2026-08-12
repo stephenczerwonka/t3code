@@ -58,10 +58,11 @@ describe("resolvePendingUserInputAnswer", () => {
     ).toBe("Orchestration-first");
   });
 
-  it("returns all selected labels for multi-select questions", () => {
+  it("returns all selected values for multi-select questions and ignores custom text", () => {
     expect(
       resolvePendingUserInputAnswer(multiSelectQuestion, {
         selectedOptionLabels: ["Server", "Web"],
+        customAnswer: "invalid scalar",
       }),
     ).toEqual(["Server", "Web"]);
   });
@@ -150,8 +151,15 @@ describe("buildPendingUserInputAnswers", () => {
     });
   });
 
-  it("returns null when any question is unanswered", () => {
+  it("returns null when any required question is unanswered", () => {
     expect(buildPendingUserInputAnswers([singleSelectQuestion], {})).toBeNull();
+  });
+
+  it("omits unanswered optional questions and accepts empty forms", () => {
+    expect(
+      buildPendingUserInputAnswers([{ ...singleSelectQuestion, required: false }], {}),
+    ).toEqual({});
+    expect(buildPendingUserInputAnswers([], {})).toEqual({});
   });
 });
 
@@ -245,6 +253,42 @@ describe("pending user input question progress", () => {
       resolvedAnswer: ["Server", "Web"],
       canAdvance: true,
       isComplete: true,
+    });
+  });
+
+  it("allows optional questions to advance without an answer", () => {
+    expect(
+      derivePendingUserInputProgress([{ ...singleSelectQuestion, required: false }], {}, 0),
+    ).toMatchObject({
+      canAdvance: true,
+      isComplete: true,
+      isReviewing: false,
+    });
+  });
+
+  it("uses the index after the last question as an explicit review state", () => {
+    expect(
+      derivePendingUserInputProgress(
+        [singleSelectQuestion],
+        { scope: { selectedOptionLabels: ["Orchestration-first"] } },
+        1,
+        true,
+      ),
+    ).toMatchObject({
+      questionIndex: 1,
+      activeQuestion: null,
+      isReviewing: true,
+      isComplete: true,
+      canAdvance: true,
+    });
+  });
+
+  it("opens empty review-required forms directly on review", () => {
+    expect(derivePendingUserInputProgress([], {}, 0, true)).toMatchObject({
+      activeQuestion: null,
+      isReviewing: true,
+      isComplete: true,
+      canAdvance: true,
     });
   });
 });

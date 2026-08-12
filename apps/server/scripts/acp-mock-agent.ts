@@ -18,6 +18,8 @@ const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
+const emitCurrentElicitation = process.env.T3_ACP_EMIT_CURRENT_ELICITATION === "1";
+const expectedElicitationAction = process.env.T3_ACP_EXPECT_ELICITATION_ACTION;
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
@@ -772,6 +774,41 @@ const program = Effect.gen(function* () {
           ],
         });
 
+        return { stopReason: "end_turn" };
+      }
+
+      if (emitCurrentElicitation) {
+        const result = yield* agent.client.extRequest("elicitation/create", {
+          sessionId: requestedSessionId,
+          toolCallId: "ask-user-question-tool-call-1",
+          mode: "form",
+          message: "Configure the migration.",
+          requestedSchema: {
+            type: "object",
+            title: "Migration",
+            properties: {
+              strategy: {
+                type: "string",
+                title: "Strategy",
+                oneOf: [
+                  { title: "Safe", const: "conservative" },
+                  { title: "Fast", const: "aggressive" },
+                ],
+              },
+              notes: {
+                type: "string",
+                title: "Notes",
+              },
+            },
+            required: ["strategy"],
+          },
+        });
+        if (typeof result !== "object" || result === null || !("action" in result)) {
+          throw new Error("Expected elicitation/create response action.");
+        }
+        if (expectedElicitationAction && result.action !== expectedElicitationAction) {
+          throw new Error(`Expected elicitation action ${expectedElicitationAction}.`);
+        }
         return { stopReason: "end_turn" };
       }
 

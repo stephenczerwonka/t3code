@@ -12,8 +12,11 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  buildPendingUserInputAnswers,
   buildThreadFeed,
+  derivePendingUserInputs,
   deriveThreadFeedPresentation,
+  togglePendingUserInputOptionSelection,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
@@ -529,6 +532,74 @@ describe("buildThreadFeed", () => {
     expect(expanded.at(-1)).toMatchObject({
       type: "work-toggle",
       expanded: true,
+    });
+  });
+});
+
+describe("pending user input", () => {
+  const questions = [
+    {
+      id: "scope",
+      header: "Scope",
+      question: "Which scope?",
+      options: [
+        { label: "Workspace", value: "workspace-write", description: "Workspace" },
+        { label: "Session", value: "session", description: "Session" },
+      ],
+      multiSelect: false,
+      required: true,
+    },
+    {
+      id: "areas",
+      header: "Areas",
+      question: "Which areas?",
+      options: [
+        { label: "Server", value: "server", description: "Server" },
+        { label: "Web", value: "web", description: "Web" },
+      ],
+      multiSelect: true,
+      required: false,
+    },
+  ] as const;
+
+  it("preserves form metadata and empty forms", () => {
+    const pending = derivePendingUserInputs([
+      makeActivity({
+        id: EventId.make("input-requested"),
+        kind: "user-input.requested",
+        summary: "User input requested",
+        createdAt: "2026-04-01T00:00:00.000Z",
+        payload: {
+          requestId: "request-1",
+          message: "Review the form.",
+          responseActions: ["decline", "cancel"],
+          requiresReview: true,
+          questions: [],
+        },
+      }),
+    ]);
+    expect(pending).toEqual([
+      {
+        requestId: "request-1",
+        createdAt: "2026-04-01T00:00:00.000Z",
+        message: "Review the form.",
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
+        questions: [],
+      },
+    ]);
+  });
+
+  it("submits option values and multi-select arrays while skipping optional questions", () => {
+    const scope = togglePendingUserInputOptionSelection(questions[0], undefined, "workspace-write");
+    const server = togglePendingUserInputOptionSelection(questions[1], undefined, "server");
+    const areas = togglePendingUserInputOptionSelection(questions[1], server, "web");
+    expect(buildPendingUserInputAnswers(questions, { scope, areas })).toEqual({
+      scope: "workspace-write",
+      areas: ["server", "web"],
+    });
+    expect(buildPendingUserInputAnswers(questions, { scope })).toEqual({
+      scope: "workspace-write",
     });
   });
 });

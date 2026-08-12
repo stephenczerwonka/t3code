@@ -8,6 +8,7 @@ import {
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
+  type ProviderUserInputAction,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
@@ -2178,6 +2179,7 @@ function ChatViewContent(props: ChatViewProps) {
             activePendingUserInput.questions,
             activePendingDraftAnswers,
             activePendingQuestionIndex,
+            activePendingUserInput.requiresReview === true,
           )
         : null,
     [activePendingDraftAnswers, activePendingQuestionIndex, activePendingUserInput],
@@ -5320,7 +5322,11 @@ function ChatViewContent(props: ChatViewProps) {
   );
 
   const onRespondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
+    async (
+      requestId: ApprovalRequestId,
+      answers: Record<string, unknown>,
+      action?: ProviderUserInputAction,
+    ) => {
       if (!activeThreadId) return;
 
       setRespondingUserInputRequestIds((existing) =>
@@ -5332,6 +5338,7 @@ function ChatViewContent(props: ChatViewProps) {
           threadId: activeThreadId,
           requestId,
           answers,
+          ...(action !== undefined ? { action } : {}),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -5361,7 +5368,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
 
   const onSelectActivePendingUserInputOption = useCallback(
-    (questionId: string, optionLabel: string) => {
+    (questionId: string, optionValue: string) => {
       if (!activePendingUserInput) {
         return;
       }
@@ -5382,7 +5389,7 @@ function ChatViewContent(props: ChatViewProps) {
             [questionId]: togglePendingUserInputOptionSelection(
               question,
               existing[activePendingUserInput.requestId]?.[questionId],
-              optionLabel,
+              optionValue,
             ),
           },
         };
@@ -5427,31 +5434,63 @@ function ChatViewContent(props: ChatViewProps) {
     [activePendingUserInput, composerRef],
   );
 
+  const onRespondToActivePendingUserInputAction = useCallback(
+    (action: ProviderUserInputAction) => {
+      if (!activePendingUserInput) {
+        return;
+      }
+      if (action === "accept") {
+        if (!activePendingResolvedAnswers) {
+          return;
+        }
+        void onRespondToUserInput(
+          activePendingUserInput.requestId,
+          activePendingResolvedAnswers,
+          activePendingUserInput.responseActions !== undefined ? action : undefined,
+        );
+        return;
+      }
+      void onRespondToUserInput(activePendingUserInput.requestId, {}, action);
+    },
+    [activePendingResolvedAnswers, activePendingUserInput, onRespondToUserInput],
+  );
+
   const onAdvanceActivePendingUserInput = useCallback(() => {
     if (!activePendingUserInput || !activePendingProgress) {
       return;
     }
+    if (activePendingProgress.isReviewing) {
+      onRespondToActivePendingUserInputAction("accept");
+      return;
+    }
     if (activePendingProgress.isLastQuestion) {
-      if (activePendingResolvedAnswers) {
-        void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
+      if (activePendingUserInput.requiresReview === true) {
+        setActivePendingUserInputQuestionIndex(activePendingUserInput.questions.length);
+      } else {
+        onRespondToActivePendingUserInputAction("accept");
       }
       return;
     }
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   }, [
     activePendingProgress,
-    activePendingResolvedAnswers,
     activePendingUserInput,
-    onRespondToUserInput,
+    onRespondToActivePendingUserInputAction,
     setActivePendingUserInputQuestionIndex,
   ]);
 
   const onPreviousActivePendingUserInputQuestion = useCallback(() => {
-    if (!activePendingProgress) {
+    if (!activePendingProgress || !activePendingUserInput) {
+      return;
+    }
+    if (activePendingProgress.isReviewing) {
+      setActivePendingUserInputQuestionIndex(
+        Math.max(activePendingUserInput.questions.length - 1, 0),
+      );
       return;
     }
     setActivePendingUserInputQuestionIndex(Math.max(activePendingProgress.questionIndex - 1, 0));
-  }, [activePendingProgress, setActivePendingUserInputQuestionIndex]);
+  }, [activePendingProgress, activePendingUserInput, setActivePendingUserInputQuestionIndex]);
 
   const onSubmitPlanFollowUp = useCallback(
     async ({
@@ -6296,6 +6335,9 @@ function ChatViewContent(props: ChatViewProps) {
                             onRespondToApproval={onRespondToApproval}
                             onSelectActivePendingUserInputOption={
                               onSelectActivePendingUserInputOption
+                            }
+                            onRespondToActivePendingUserInputAction={
+                              onRespondToActivePendingUserInputAction
                             }
                             onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
                             onPreviousActivePendingUserInputQuestion={

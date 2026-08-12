@@ -260,6 +260,121 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("handles current ACP form elicitation and returns typed answers", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-current-elicitation");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EMIT_CURRENT_ELICITATION: "1",
+          T3_ACP_EXPECT_ELICITATION_ACTION: "accept",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const requested =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.requested" }>>();
+      const resolved =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.resolved" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type === "user-input.requested") {
+          return Deferred.succeed(requested, event).pipe(Effect.ignore);
+        }
+        if (event.type === "user-input.resolved") {
+          return Deferred.succeed(resolved, event).pipe(Effect.ignore);
+        }
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turnFiber = yield* adapter
+        .sendTurn({ threadId, input: "ask before continuing", attachments: [] })
+        .pipe(Effect.forkChild);
+
+      const requestedEvent = yield* Deferred.await(requested);
+      assert.equal(requestedEvent.payload.message, "Configure the migration.");
+      assert.deepStrictEqual(requestedEvent.payload.responseActions, ["decline", "cancel"]);
+      assert.isTrue(requestedEvent.payload.requiresReview);
+      assert.equal(requestedEvent.payload.questions[0]?.id, "strategy");
+      assert.equal(requestedEvent.payload.questions[0]?.options[0]?.label, "Safe");
+      assert.equal(requestedEvent.payload.questions[0]?.options[0]?.value, "conservative");
+      assert.isFalse(requestedEvent.payload.questions[1]?.required);
+
+      const validationError = yield* Effect.flip(
+        adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requestedEvent.requestId)),
+          { strategy: "unknown" },
+          "accept",
+        ),
+      );
+      assert.equal(validationError._tag, "ProviderAdapterValidationError");
+
+      yield* adapter.respondToUserInput(
+        threadId,
+        ApprovalRequestId.make(String(requestedEvent.requestId)),
+        { strategy: "conservative" },
+        "accept",
+      );
+      const resolvedEvent = yield* Deferred.await(resolved);
+      assert.equal(resolvedEvent.payload.action, "accept");
+      assert.deepStrictEqual(resolvedEvent.payload.answers, { strategy: "conservative" });
+      yield* Fiber.join(turnFiber);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("cancels a pending current ACP form when the turn is interrupted", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-current-elicitation-cancel");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EMIT_CURRENT_ELICITATION: "1",
+          T3_ACP_EXPECT_ELICITATION_ACTION: "cancel",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const requested =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.requested" }>>();
+      const resolved =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "user-input.resolved" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type === "user-input.requested") {
+          return Deferred.succeed(requested, event).pipe(Effect.ignore);
+        }
+        if (event.type === "user-input.resolved") {
+          return Deferred.succeed(resolved, event).pipe(Effect.ignore);
+        }
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turnFiber = yield* adapter
+        .sendTurn({ threadId, input: "ask before continuing", attachments: [] })
+        .pipe(Effect.forkChild);
+      const requestedEvent = yield* Deferred.await(requested);
+
+      yield* adapter.interruptTurn(threadId, requestedEvent.turnId);
+      const resolvedEvent = yield* Deferred.await(resolved);
+      assert.equal(resolvedEvent.payload.action, "cancel");
+      assert.deepStrictEqual(resolvedEvent.payload.answers, {});
+      yield* Fiber.join(turnFiber);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
       // Windows delivers no POSIX signals: killing the cmd-shim child

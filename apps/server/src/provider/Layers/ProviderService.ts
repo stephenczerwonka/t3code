@@ -871,7 +871,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.thread_id": input.threadId,
         "provider.request_id": input.requestId,
       });
-      yield* routed.adapter.respondToUserInput(routed.threadId, input.requestId, input.answers);
+      if (
+        input.action !== undefined &&
+        input.action !== "accept" &&
+        !routed.adapter.capabilities.userInputActions?.includes(input.action)
+      ) {
+        return yield* new ProviderValidationError({
+          operation: "ProviderService.respondToUserInput",
+          issue: `Provider '${routed.adapter.provider}' does not support '${input.action}' user-input responses.`,
+        });
+      }
+      yield* routed.adapter.respondToUserInput(
+        routed.threadId,
+        input.requestId,
+        input.answers,
+        input.action,
+      );
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,

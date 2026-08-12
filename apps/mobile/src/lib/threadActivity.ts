@@ -3,6 +3,7 @@ import type {
   OrchestrationLatestTurn,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  ProviderUserInputAction,
   ToolLifecycleItemType,
   TurnId,
   UserInputQuestion,
@@ -22,11 +23,14 @@ export interface PendingApproval {
 export interface PendingUserInput {
   readonly requestId: ApprovalRequestId;
   readonly createdAt: string;
+  readonly message?: string;
   readonly questions: ReadonlyArray<UserInputQuestion>;
+  readonly responseActions?: ReadonlyArray<ProviderUserInputAction>;
+  readonly requiresReview?: boolean;
 }
 
 export interface PendingUserInputDraftAnswer {
-  readonly selectedOptionLabel?: string;
+  readonly selectedOptionLabels?: ReadonlyArray<string>;
   readonly customAnswer?: string;
 }
 
@@ -200,23 +204,32 @@ function parseUserInputQuestions(
           return {
             label: record.label,
             description: record.description,
+            ...(typeof record.value === "string" ? { value: record.value } : {}),
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
-        return null;
-      }
       return {
         id: question.id,
         header: question.header,
         question: question.question,
         options,
         multiSelect: question.multiSelect === true,
+        ...(typeof question.required === "boolean" ? { required: question.required } : {}),
       };
     })
     .filter((question): question is UserInputQuestion => question !== null);
 
-  return parsed.length > 0 ? parsed : null;
+  return parsed;
+}
+
+function parseProviderUserInputActions(
+  value: unknown,
+): ReadonlyArray<ProviderUserInputAction> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(
+    (action): action is ProviderUserInputAction =>
+      action === "accept" || action === "decline" || action === "cancel",
+  );
 }
 
 function normalizeDraftAnswer(value: string | undefined): string | null {
@@ -227,14 +240,44 @@ function normalizeDraftAnswer(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function resolvePendingUserInputAnswer(
+function normalizeSelectedOptionLabels(
+  value: ReadonlyArray<string> | undefined,
+): ReadonlyArray<string> {
+  if (!value) return [];
+  return Array.from(new Set(value.map((entry) => entry.trim()).filter(Boolean)));
+}
+
+export function resolvePendingUserInputAnswer(
+  question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
-): string | null {
+): string | string[] | null {
+  const selectedOptionLabels = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
+  if (question.multiSelect) {
+    return selectedOptionLabels.length > 0 ? [...selectedOptionLabels] : null;
+  }
   const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer) {
     return customAnswer;
   }
-  return normalizeDraftAnswer(draft?.selectedOptionLabel);
+  return selectedOptionLabels[0] ?? null;
+}
+
+export function togglePendingUserInputOptionSelection(
+  question: UserInputQuestion,
+  draft: PendingUserInputDraftAnswer | undefined,
+  optionValue: string,
+): PendingUserInputDraftAnswer {
+  if (question.multiSelect) {
+    const selected = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
+    const selectedOptionLabels = selected.includes(optionValue)
+      ? selected.filter((value) => value !== optionValue)
+      : [...selected, optionValue];
+    return {
+      customAnswer: "",
+      ...(selectedOptionLabels.length > 0 ? { selectedOptionLabels } : {}),
+    };
+  }
+  return { customAnswer: "", selectedOptionLabels: [optionValue] };
 }
 
 /** Codex children settle via task.updated (idle/failed/interrupted), never
@@ -1397,10 +1440,16 @@ export function derivePendingUserInputs(
       if (!questions) {
         continue;
       }
+      const responseActions = parseProviderUserInputActions(payload?.responseActions);
       openByRequestId.set(requestId, {
         requestId,
         createdAt: activity.createdAt,
+        ...(typeof payload?.message === "string" ? { message: payload.message } : {}),
         questions,
+        ...(responseActions !== undefined ? { responseActions } : {}),
+        ...(typeof payload?.requiresReview === "boolean"
+          ? { requiresReview: payload.requiresReview }
+          : {}),
       });
       continue;
     }
@@ -1426,24 +1475,27 @@ export function setPendingUserInputCustomAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
   customAnswer: string,
 ): PendingUserInputDraftAnswer {
-  const selectedOptionLabel =
-    customAnswer.trim().length > 0 ? undefined : draft?.selectedOptionLabel;
+  const selectedOptionLabels =
+    customAnswer.trim().length > 0 ? undefined : draft?.selectedOptionLabels;
   return {
     customAnswer,
-    ...(selectedOptionLabel ? { selectedOptionLabel } : {}),
+    ...(selectedOptionLabels && selectedOptionLabels.length > 0 ? { selectedOptionLabels } : {}),
   };
 }
 
 export function buildPendingUserInputAnswers(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
-): Record<string, string> | null {
-  const answers: Record<string, string> = {};
+): Record<string, string | string[]> | null {
+  const answers: Record<string, string | string[]> = {};
 
   for (const question of questions) {
-    const answer = resolvePendingUserInputAnswer(draftAnswers[question.id]);
+    const answer = resolvePendingUserInputAnswer(question, draftAnswers[question.id]);
     if (!answer) {
-      return null;
+      if (question.required !== false) {
+        return null;
+      }
+      continue;
     }
     answers[question.id] = answer;
   }

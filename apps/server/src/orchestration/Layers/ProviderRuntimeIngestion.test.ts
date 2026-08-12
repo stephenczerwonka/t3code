@@ -3459,6 +3459,9 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-user-input"),
       requestId: ApprovalRequestId.make("req-user-input-1"),
       payload: {
+        message: "Review the sandbox configuration.",
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
         questions: [
           {
             id: "sandbox_mode",
@@ -3466,10 +3469,12 @@ describe("ProviderRuntimeIngestion", () => {
             question: "Which mode should be used?",
             options: [
               {
-                label: "workspace-write",
+                label: "Workspace",
+                value: "workspace-write",
                 description: "Allow workspace writes only",
               },
             ],
+            required: true,
           },
         ],
       },
@@ -3484,6 +3489,7 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-user-input"),
       requestId: ApprovalRequestId.make("req-user-input-1"),
       payload: {
+        action: "accept",
         answers: {
           sandbox_mode: "workspace-write",
         },
@@ -3505,6 +3511,18 @@ describe("ProviderRuntimeIngestion", () => {
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-requested",
     );
     expect(requested?.kind).toBe("user-input.requested");
+    expect(requested?.payload).toMatchObject({
+      message: "Review the sandbox configuration.",
+      responseActions: ["decline", "cancel"],
+      requiresReview: true,
+      questions: [
+        {
+          id: "sandbox_mode",
+          required: true,
+          options: [{ label: "Workspace", value: "workspace-write" }],
+        },
+      ],
+    });
 
     const resolved = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-resolved",
@@ -3514,6 +3532,7 @@ describe("ProviderRuntimeIngestion", () => {
         ? (resolved.payload as Record<string, unknown>)
         : undefined;
     expect(resolved?.kind).toBe("user-input.resolved");
+    expect(resolvedPayload?.action).toBe("accept");
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });

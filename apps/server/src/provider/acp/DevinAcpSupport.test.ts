@@ -6,12 +6,23 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import {
   applyDevinAcpModelSelection,
   buildDevinAcpSpawnInput,
+  DEVIN_ACP_CLIENT_CAPABILITIES,
   hasDevinCredentials,
   resolveDevinAuthMethod,
   resolveDevinAcpBaseModelId,
   resolveDevinPermissionMode,
   resolveDevinPromptIdleTimeout,
 } from "./DevinAcpSupport.ts";
+
+describe("DEVIN_ACP_CLIENT_CAPABILITIES", () => {
+  it("advertises form elicitation without URL, filesystem, or terminal support", () => {
+    expect(DEVIN_ACP_CLIENT_CAPABILITIES).toEqual({
+      elicitation: { form: {} },
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+    });
+  });
+});
 
 describe("resolveDevinPromptIdleTimeout", () => {
   it("defaults to one hour and honors an explicit override", () => {

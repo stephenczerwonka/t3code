@@ -5,6 +5,7 @@ import type {
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderUserInputAction,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   ScopedThreadRef,
@@ -394,6 +395,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
+    isReviewing: boolean;
+    willReview: boolean;
     canAdvance: boolean;
     isResponding: boolean;
     isComplete: boolean;
@@ -524,6 +527,7 @@ export interface ChatComposerProps {
   activePendingProgress: {
     questionIndex: number;
     isLastQuestion: boolean;
+    isReviewing: boolean;
     canAdvance: boolean;
     customAnswer: string;
     activeQuestion: { id: string; multiSelect?: boolean | undefined } | null;
@@ -573,7 +577,8 @@ export interface ChatComposerProps {
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
   ) => Promise<unknown>;
-  onSelectActivePendingUserInputOption: (questionId: string, optionLabel: string) => void;
+  onSelectActivePendingUserInputOption: (questionId: string, optionValue: string) => void;
+  onRespondToActivePendingUserInputAction: (action: ProviderUserInputAction) => void;
   onAdvanceActivePendingUserInput: () => void;
   onPreviousActivePendingUserInputQuestion: () => void;
   onChangeActivePendingUserInputCustomAnswer: (
@@ -653,6 +658,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onImplementPlanInNewThread,
     onRespondToApproval,
     onSelectActivePendingUserInputOption,
+    onRespondToActivePendingUserInputAction,
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
@@ -1224,12 +1230,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         ? {
             questionIndex: activePendingProgress.questionIndex,
             isLastQuestion: activePendingProgress.isLastQuestion,
+            isReviewing: activePendingProgress.isReviewing,
+            willReview:
+              activePendingUserInput?.requiresReview === true &&
+              activePendingProgress.isLastQuestion &&
+              !activePendingProgress.isReviewing,
             canAdvance: activePendingProgress.canAdvance,
             isResponding: activePendingIsResponding,
             isComplete: Boolean(activePendingResolvedAnswers),
           }
         : null,
-    [activePendingIsResponding, activePendingProgress, activePendingResolvedAnswers],
+    [
+      activePendingIsResponding,
+      activePendingProgress,
+      activePendingResolvedAnswers,
+      activePendingUserInput?.requiresReview,
+    ],
   );
   const collapsedComposerPrimaryActionDisabled =
     phase === "running" ||
@@ -2713,6 +2729,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
+                  onRespond={onRespondToActivePendingUserInputAction}
                   onAdvance={onAdvanceActivePendingUserInput}
                 />
               </div>
@@ -2753,6 +2770,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
+                onRespond={onRespondToActivePendingUserInputAction}
                 onAdvance={onAdvanceActivePendingUserInput}
               />
               <div className="px-3 pb-3 sm:px-4">
@@ -2772,11 +2790,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     )}
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={expandMobileComposer}
-                    aria-label="Write custom answer"
+                    aria-label={
+                      activePendingProgress?.isReviewing ? "Review answers" : "Write custom answer"
+                    }
                   >
-                    {activePendingProgress?.customAnswer || "Write custom answer"}
+                    {activePendingProgress?.isReviewing
+                      ? "Review answers"
+                      : activePendingProgress?.customAnswer || "Write custom answer"}
                   </button>
-                  {activePendingProgress?.activeQuestion?.multiSelect ? (
+                  {activePendingProgress?.isReviewing ||
+                  activePendingProgress?.activeQuestion?.multiSelect ? (
                     <ComposerPrimaryActions
                       compact
                       pendingAction={pendingPrimaryAction}
@@ -3041,19 +3064,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 placeholder={
                   isComposerApprovalState
                     ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
-                    : activePendingProgress
-                      ? "Type your own answer, or leave this blank to use the selected option"
-                      : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "Add feedback to refine the plan, or leave this blank to implement it"
-                        : projectSelectionRequired
-                          ? "Choose a project above to start a thread"
-                          : noProviderAvailable
-                            ? "Enable a provider in Settings to send a message"
-                            : phase === "disconnected"
-                              ? "Ask for follow-up changes or attach images"
-                              : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                    : activePendingProgress?.isReviewing
+                      ? "Review and submit the answers above"
+                      : activePendingProgress?.activeQuestion?.multiSelect
+                        ? "Choose one or more options above"
+                        : activePendingProgress
+                          ? "Type your own answer, or leave this blank to use the selected option"
+                          : showPlanFollowUpPrompt && activeProposedPlan
+                            ? "Add feedback to refine the plan, or leave this blank to implement it"
+                            : projectSelectionRequired
+                              ? "Choose a project above to start a thread"
+                              : noProviderAvailable
+                                ? "Enable a provider in Settings to send a message"
+                                : phase === "disconnected"
+                                  ? "Ask for follow-up changes or attach images"
+                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
-                disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
+                disabled={
+                  isConnecting ||
+                  isComposerApprovalState ||
+                  projectSelectionRequired ||
+                  activePendingProgress?.isReviewing === true ||
+                  activePendingProgress?.activeQuestion?.multiSelect === true
+                }
               />
               {showMobilePendingAnswerActions ? (
                 <div

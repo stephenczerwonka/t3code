@@ -8,6 +8,8 @@ import { Spinner } from "../ui/spinner";
 interface PendingActionState {
   questionIndex: number;
   isLastQuestion: boolean;
+  isReviewing?: boolean;
+  willReview?: boolean;
   canAdvance: boolean;
   isResponding: boolean;
   isComplete: boolean;
@@ -34,14 +36,22 @@ interface ComposerPrimaryActionsProps {
 export const formatPendingPrimaryActionLabel = (input: {
   compact: boolean;
   isLastQuestion: boolean;
+  isReviewing?: boolean;
+  willReview?: boolean;
   isResponding: boolean;
   questionIndex: number;
 }) => {
   if (input.isResponding) {
     return "Submitting...";
   }
+  if (input.willReview) {
+    return input.compact ? "Review" : "Review answers";
+  }
   if (input.compact) {
     return input.isLastQuestion ? "Submit" : "Next";
+  }
+  if (input.isReviewing) {
+    return "Submit answers";
   }
   if (!input.isLastQuestion) {
     return "Next question";
@@ -139,6 +149,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {formatPendingPrimaryActionLabel({
             compact,
             isLastQuestion: pendingAction.isLastQuestion,
+            isReviewing: pendingAction.isReviewing === true,
+            willReview: pendingAction.willReview === true,
             isResponding: pendingAction.isResponding,
             questionIndex: pendingAction.questionIndex,
           })}

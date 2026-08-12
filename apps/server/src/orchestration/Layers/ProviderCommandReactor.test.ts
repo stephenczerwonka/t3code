@@ -2756,6 +2756,7 @@ describe("ProviderCommandReactor", () => {
         answers: {
           sandbox_mode: "workspace-write",
         },
+        action: "accept",
         createdAt: now,
       }),
     );
@@ -2767,6 +2768,7 @@ describe("ProviderCommandReactor", () => {
       answers: {
         sandbox_mode: "workspace-write",
       },
+      action: "accept",
     });
   });
 

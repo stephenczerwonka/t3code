@@ -22,6 +22,7 @@ import {
   RuntimeMode,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderUserInputAction } from "./providerRuntime.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -106,6 +107,7 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  action: Schema.optional(ProviderUserInputAction),
 });
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 

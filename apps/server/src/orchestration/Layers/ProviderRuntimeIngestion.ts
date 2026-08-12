@@ -510,7 +510,14 @@ export function runtimeEventToActivities(
           summary: "User input requested",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
+            ...(event.payload.message ? { message: event.payload.message } : {}),
             questions: event.payload.questions,
+            ...(event.payload.responseActions
+              ? { responseActions: event.payload.responseActions }
+              : {}),
+            ...(event.payload.requiresReview !== undefined
+              ? { requiresReview: event.payload.requiresReview }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -528,6 +535,7 @@ export function runtimeEventToActivities(
           summary: "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
+            ...(event.payload.action ? { action: event.payload.action } : {}),
             answers: event.payload.answers,
           },
           turnId: toTurnId(event.turnId) ?? null,

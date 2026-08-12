@@ -1326,6 +1326,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           requestId: event.payload.requestId,
           answers: event.payload.answers,
+          ...(event.payload.action !== undefined ? { action: event.payload.action } : {}),
         })
         .pipe(
           Effect.catchCause((cause) =>
