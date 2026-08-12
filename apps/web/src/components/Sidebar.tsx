@@ -20,6 +20,7 @@ import {
   canSnooze,
   effectiveSettled,
   effectiveSnoozed,
+  resolveThreadAutoSettleChangeRequestState,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
@@ -746,7 +747,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     threadBranch: thread.branch,
     gitStatus: gitStatus.data,
   });
-  const prState = pr?.state ?? null;
+  const prState = resolveThreadAutoSettleChangeRequestState({
+    threadCreatedAt: thread.createdAt,
+    changeRequest: pr,
+  });
 
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.

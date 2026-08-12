@@ -29,6 +29,7 @@ import {
 import {
   effectiveSettled,
   effectiveSnoozed,
+  resolveThreadAutoSettleChangeRequestState,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
@@ -4031,6 +4032,12 @@ function ChatViewContent(props: ChatViewProps) {
     threadBranch: activeThread?.branch ?? null,
     gitStatus: gitStatusQuery.data ?? null,
   });
+  const activeThreadPrState = activeThread
+    ? resolveThreadAutoSettleChangeRequestState({
+        threadCreatedAt: activeThread.createdAt,
+        changeRequest: activeThreadPr,
+      })
+    : null;
   const supportsSettlement = serverConfig?.environment.capabilities.threadSettlement === true;
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const nowMinute = useNowMinute();
@@ -4067,7 +4074,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const activeThreadWokeVisible = useMemo(() => {
     if (activeThreadWokeAt === null) return false;
-    if (activeThreadPr?.state === "merged" || activeThreadPr?.state === "closed") return false;
+    if (activeThreadPrState === "merged" || activeThreadPrState === "closed") return false;
     const wokeAtMs = Date.parse(activeThreadWokeAt);
     if (Number.isNaN(wokeAtMs)) return false;
     // Having the thread open counts as a visit at completedAt (the effect
@@ -4087,7 +4094,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeLatestTurn?.completedAt,
     activeThreadLastVisitedAt,
-    activeThreadPr?.state,
+    activeThreadPrState,
     activeThreadWokeAt,
   ]);
   const activeThreadSettled = useMemo(() => {
@@ -4100,11 +4107,11 @@ function ChatViewContent(props: ChatViewProps) {
     return effectiveSettled(activeThreadShell, {
       now: `${nowMinute}:00.000Z`,
       autoSettleAfterDays,
-      changeRequestState: activeThreadPr?.state ?? null,
+      changeRequestState: activeThreadPrState,
     });
   }, [
     activeThread?.session?.status,
-    activeThreadPr?.state,
+    activeThreadPrState,
     activeThreadShell,
     autoSettleAfterDays,
     nowMinute,
@@ -6079,7 +6086,7 @@ function ChatViewContent(props: ChatViewProps) {
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
             isServerThread={isServerThread}
-            changeRequestState={activeThreadPr?.state ?? null}
+            changeRequestState={activeThreadPrState}
             activeProjectName={activeProject?.title}
             activeProjectCwd={activeProject?.workspaceRoot ?? null}
             activeProjectFaviconPath={activeProject?.faviconPath ?? null}

@@ -10,12 +10,14 @@ const pullRequest: NonNullable<VcsStatusResult["pr"]> = {
   baseRef: "main",
   headRef: "codex/desktop-style-pr-indicator",
   state: "merged",
+  updatedAt: "2026-04-10T00:00:00.000Z",
 };
 
 describe("presentThreadPr", () => {
   it("uses the compact pull request number label without a hash prefix", () => {
     expect(presentThreadPr(pullRequest, undefined)).toMatchObject({
       label: "3774",
+      updatedAt: "2026-04-10T00:00:00.000Z",
       accessibilityLabel: "#3774 pull request merged",
       textClassName: "text-violet-600 dark:text-violet-400",
     });
