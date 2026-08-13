@@ -13,6 +13,7 @@ import type * as AcpSchema from "effect-acp/schema";
 
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
+const ignoreSigterm = process.env.T3_ACP_IGNORE_SIGTERM === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -43,6 +44,8 @@ const forceModeConfig = process.env.T3_ACP_FORCE_MODE_CONFIG === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
+const hangNextListTriggerPath = process.env.T3_ACP_HANG_NEXT_LIST_TRIGGER_PATH;
+const hangingListEnteredPath = process.env.T3_ACP_HANGING_LIST_ENTERED_PATH;
 const permissionOptionIds = {
   allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
   allowAlways: process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
@@ -84,7 +87,9 @@ function writeJsonRpcNotification(method: string, params: unknown): void {
 
 process.once("SIGTERM", () => {
   logExit("SIGTERM");
-  process.exit(0);
+  if (!ignoreSigterm) {
+    process.exit(0);
+  }
 });
 
 process.once("SIGINT", () => {
@@ -307,7 +312,7 @@ const program = Effect.gen(function* () {
         request.clientCapabilities?._meta?.parameterizedModelPicker === true;
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true },
+        agentCapabilities: { loadSession: true, sessionCapabilities: { list: {} } },
       };
     }),
   );
@@ -320,6 +325,21 @@ const program = Effect.gen(function* () {
       modes: modeState(),
       models: modelState(),
       configOptions: configOptions(),
+    }),
+  );
+
+  yield* agent.handleListSessions(() =>
+    Effect.gen(function* () {
+      if (hangNextListTriggerPath && NodeFS.existsSync(hangNextListTriggerPath)) {
+        yield* Effect.sync(() => NodeFS.unlinkSync(hangNextListTriggerPath));
+        if (hangingListEnteredPath) {
+          yield* Effect.sync(() => NodeFS.writeFileSync(hangingListEnteredPath, "entered", "utf8"));
+        }
+        return yield* Effect.never;
+      }
+      return {
+        sessions: [{ sessionId, cwd: process.cwd() }],
+      };
     }),
   );
 

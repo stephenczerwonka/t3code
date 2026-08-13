@@ -121,6 +121,7 @@ export interface AcpSpawnInput {
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
+  readonly processForceKillAfter?: Duration.Input;
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
@@ -472,6 +473,9 @@ export const make = (
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
           ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
+          ...(options.processForceKillAfter
+            ? { forceKillAfter: options.processForceKillAfter }
+            : {}),
           shell: spawnCommand.shell,
         }),
       )

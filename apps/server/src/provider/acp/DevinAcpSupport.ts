@@ -30,6 +30,7 @@ const DEVIN_PERMISSION_MODE_ENV = "DEVIN_PERMISSION_MODE";
  * hour instead — still finite, so a genuinely wedged turn surfaces.
  */
 const DEVIN_PROMPT_IDLE_TIMEOUT = Duration.minutes(60);
+const DEVIN_PROCESS_FORCE_KILL_AFTER = Duration.seconds(2);
 
 export const DEVIN_ACP_CLIENT_CAPABILITIES = {
   elicitation: { form: {} },
@@ -206,6 +207,7 @@ export const makeDevinAcpRuntime = (
       AcpSessionRuntime.layer({
         ...input,
         clientCapabilities: DEVIN_ACP_CLIENT_CAPABILITIES,
+        processForceKillAfter: DEVIN_PROCESS_FORCE_KILL_AFTER,
         promptIdleTimeout: resolveDevinPromptIdleTimeout(input.promptIdleTimeout),
         spawn: buildDevinAcpSpawnInput(
           input.devinSettings,

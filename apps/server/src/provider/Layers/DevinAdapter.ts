@@ -9,12 +9,15 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  type RuntimeMode,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -76,6 +79,8 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonStri
 
 const PROVIDER = ProviderDriverKind.make("devin");
 const DEVIN_RESUME_VERSION = 1 as const;
+const DEVIN_IDLE_LIVENESS_PROBE_AFTER = Duration.minutes(5);
+const DEVIN_IDLE_LIVENESS_PROBE_TIMEOUT = Duration.seconds(2);
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -87,6 +92,8 @@ export interface DevinAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  readonly idleLivenessProbeAfter?: Duration.Input;
+  readonly idleLivenessProbeTimeout?: Duration.Input;
 }
 
 interface PendingApproval {
@@ -115,6 +122,7 @@ interface PendingUserInput {
 interface DevinSessionContext {
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
+  readonly runtimeMode: RuntimeMode;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
@@ -135,6 +143,7 @@ interface DevinSessionContext {
    * the active one. */
   inFlightTurnIds: Array<TurnId>;
   currentModelId: string | undefined;
+  lastPromptSettledAtMillis: number;
   stopped: boolean;
 }
 
@@ -305,9 +314,17 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
+    const idleLivenessProbeAfter = Duration.fromInputUnsafe(
+      options?.idleLivenessProbeAfter ?? DEVIN_IDLE_LIVENESS_PROBE_AFTER,
+    );
+    const idleLivenessProbeTimeout = Duration.fromInputUnsafe(
+      options?.idleLivenessProbeTimeout ?? DEVIN_IDLE_LIVENESS_PROBE_TIMEOUT,
+    );
 
     const sessions = new Map<ThreadId, DevinSessionContext>();
+    const ownedThreadIds = new Set<ThreadId>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const stoppingAllRef = yield* Ref.make(false);
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -424,6 +441,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             status: "ready",
             updatedAt,
           };
+          liveCtx.lastPromptSettledAtMillis = yield* Clock.currentTimeMillis;
           if (options?.emitTurnCompletion === false || !canEmitTurnCompletion) {
             return;
           }
@@ -456,6 +474,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             status: "ready",
             updatedAt,
           };
+          liveCtx.lastPromptSettledAtMillis = yield* Clock.currentTimeMillis;
         }
         if (options?.emitTurnCompletion === false) {
           return;
@@ -547,7 +566,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       return Effect.succeed(ctx);
     };
 
-    const stopSessionInternal = (ctx: DevinSessionContext) =>
+    const stopSessionInternal = (ctx: DevinSessionContext, emitExit = true) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
@@ -558,19 +577,28 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
         sessions.delete(ctx.threadId);
-        yield* offerRuntimeEvent({
-          type: "session.exited",
-          ...(yield* makeEventStamp()),
-          provider: PROVIDER,
-          threadId: ctx.threadId,
-          payload: { exitKind: "graceful" },
-        });
+        if (emitExit) {
+          ownedThreadIds.delete(ctx.threadId);
+          yield* offerRuntimeEvent({
+            type: "session.exited",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            payload: { exitKind: "graceful" },
+          });
+        }
       });
 
-    const startSession: DevinAdapterShape["startSession"] = (input) =>
-      withThreadLock(
-        input.threadId,
+    const startSessionUnlocked = (input: Parameters<DevinAdapterShape["startSession"]>[0]) =>
+      Effect.suspend(() =>
         Effect.gen(function* () {
+          if (yield* Ref.get(stoppingAllRef)) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: "Devin adapter is stopping all sessions.",
+            });
+          }
           if (input.provider !== undefined && input.provider !== PROVIDER) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
@@ -883,6 +911,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           const ctx: DevinSessionContext = {
             threadId: input.threadId,
             acpSessionId: started.sessionId,
+            runtimeMode: input.runtimeMode,
             session,
             scope: sessionScope,
             acp,
@@ -896,6 +925,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             interruptedTurnIds: new Set(),
             inFlightTurnIds: [],
             currentModelId: boundModelId,
+            lastPromptSettledAtMillis: yield* Clock.currentTimeMillis,
             stopped: false,
           };
 
@@ -999,6 +1029,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
+          ownedThreadIds.add(input.threadId);
           sessionScopeTransferred = true;
 
           yield* offerRuntimeEvent({
@@ -1027,12 +1058,100 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
         }).pipe(Effect.scoped),
       );
 
+    const startSession: DevinAdapterShape["startSession"] = (input) =>
+      Effect.flatMap(getThreadSemaphore(input.threadId), (semaphore) =>
+        Effect.sync(() => ownedThreadIds.add(input.threadId)).pipe(
+          Effect.andThen(semaphore.withPermit(startSessionUnlocked(input))),
+          Effect.onError(() =>
+            Effect.sync(() => {
+              if (!sessions.has(input.threadId)) {
+                ownedThreadIds.delete(input.threadId);
+              }
+            }),
+          ),
+        ),
+      );
+
+    const shouldProbeIdleSession = Effect.fn("shouldProbeIdleDevinSession")(function* (
+      ctx: DevinSessionContext,
+    ) {
+      if (ctx.inFlightTurnIds.length > 0) {
+        return false;
+      }
+      const nowMillis = yield* Clock.currentTimeMillis;
+      return nowMillis - ctx.lastPromptSettledAtMillis >= Duration.toMillis(idleLivenessProbeAfter);
+    });
+
+    const probeIdleSession = Effect.fn("probeIdleDevinSession")(function* (
+      ctx: DevinSessionContext,
+    ) {
+      const result = yield* ctx.acp.request("session/list", { cwd: ctx.session.cwd }).pipe(
+        Effect.match({
+          onFailure: (error) => error._tag === "AcpRequestError",
+          onSuccess: () => true,
+        }),
+        Effect.timeoutOption(idleLivenessProbeTimeout),
+      );
+      return Option.getOrElse(result, () => false);
+    });
+
+    const restartIdleSession = Effect.fn("restartIdleDevinSession")(function* (
+      ctx: DevinSessionContext,
+    ) {
+      const restartInput: Parameters<DevinAdapterShape["startSession"]>[0] = {
+        threadId: ctx.threadId,
+        provider: PROVIDER,
+        cwd: ctx.session.cwd,
+        resumeCursor: ctx.session.resumeCursor,
+        runtimeMode: ctx.runtimeMode,
+        ...(ctx.session.model
+          ? {
+              modelSelection: {
+                instanceId: boundInstanceId,
+                model: ctx.session.model,
+              },
+            }
+          : {}),
+      };
+      if (yield* Ref.get(stoppingAllRef)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/start",
+          detail: "Devin adapter is stopping all sessions.",
+        });
+      }
+      yield* stopSessionInternal(ctx, false);
+      yield* startSessionUnlocked(restartInput).pipe(
+        Effect.tapError((error) =>
+          Effect.gen(function* () {
+            const stoppingAll = yield* Ref.get(stoppingAllRef);
+            ownedThreadIds.delete(ctx.threadId);
+            yield* offerRuntimeEvent({
+              type: "session.exited",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              payload: stoppingAll
+                ? { exitKind: "graceful", reason: "Session stopped." }
+                : {
+                    exitKind: "error",
+                    reason: error.message,
+                    recoverable: true,
+                  },
+            });
+          }),
+        ),
+      );
+      return yield* requireSession(ctx.threadId);
+    });
+
     const sendTurn: DevinAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const prepared = yield* withThreadLock(
           input.threadId,
           Effect.gen(function* () {
-            const ctx = yield* requireSession(input.threadId);
+            let ctx = yield* requireSession(input.threadId);
+            const shouldProbe = yield* shouldProbeIdleSession(ctx);
             // A sendTurn while a prompt is in flight is a steer. Devin's ACP
             // server serializes session/prompt (the steered prompt only starts
             // once the in-flight one returns), so the steer opens its own new
@@ -1040,18 +1159,35 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             // turn — each prompt settles its own turn with its own result.
             const queuedBehind = ctx.inFlightTurnIds.length > 0;
             const turnId = TurnId.make(yield* randomUUIDv4);
-            // Enqueue immediately so a superseded in-flight prompt resolving
-            // from here on settles its own turn; removed on settlement below.
-            ctx.inFlightTurnIds = [...ctx.inFlightTurnIds, turnId];
-            // Bind the turn id before cooperative yields so interruptTurn can
-            // settle this prompt even if stop arrives during preparation.
-            ctx.activeTurnId = turnId;
-            ctx.session = {
-              ...ctx.session,
-              status: queuedBehind ? "running" : "connecting",
-              activeTurnId: turnId,
-              updatedAt: yield* nowIso,
-            };
+            const markTurnPreparing = (target: DevinSessionContext) =>
+              Effect.gen(function* () {
+                // Enqueue immediately so a superseded in-flight prompt resolving
+                // from here on settles its own turn; removed on settlement below.
+                target.inFlightTurnIds = [...target.inFlightTurnIds, turnId];
+                // Bind the turn id before cooperative yields so interruptTurn can
+                // settle this prompt even if stop arrives during preparation.
+                target.activeTurnId = turnId;
+                target.session = {
+                  ...target.session,
+                  status: queuedBehind ? "running" : "connecting",
+                  activeTurnId: turnId,
+                  updatedAt: yield* nowIso,
+                };
+              });
+            yield* markTurnPreparing(ctx);
+
+            if (shouldProbe && !(yield* probeIdleSession(ctx))) {
+              const staleCtx = ctx;
+              yield* Effect.logWarning("Restarting an unresponsive idle Devin ACP session.", {
+                threadId: input.threadId,
+                acpSessionId: staleCtx.acpSessionId,
+              });
+              ctx = yield* restartIdleSession(staleCtx);
+              ctx.turns = staleCtx.turns;
+              ctx.interruptedTurnIds = new Set(staleCtx.interruptedTurnIds);
+              ctx.inFlightTurnIds = [];
+              yield* markTurnPreparing(ctx);
+            }
 
             return yield* Effect.gen(function* () {
               const turnModelSelection =
@@ -1305,6 +1441,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   updatedAt: completedAt,
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
+                ctx.lastPromptSettledAtMillis = yield* Clock.currentTimeMillis;
               } else {
                 ctx.session = {
                   ...ctx.session,
@@ -1438,10 +1575,15 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
           threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(threadId);
-            if (observed.acpSessionId !== undefined && ctx.acpSessionId !== observed.acpSessionId) {
+            const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
+            if (
+              observed.acpSessionId !== undefined &&
+              ctx.acpSessionId !== observed.acpSessionId &&
+              (observed.interruptedTurnId === undefined ||
+                activeTurnId !== observed.interruptedTurnId)
+            ) {
               return;
             }
-            const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
             if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
               return;
             }
@@ -1581,13 +1723,41 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       Effect.sync(() => Array.from(sessions.values(), (c) => ({ ...c.session })));
 
     const hasSession: DevinAdapterShape["hasSession"] = (threadId) =>
-      Effect.sync(() => {
-        const c = sessions.get(threadId);
-        return c !== undefined && !c.stopped;
+      Effect.gen(function* () {
+        if (!ownedThreadIds.has(threadId)) {
+          return false;
+        }
+        const semaphore = (yield* SynchronizedRef.get(threadLocksRef)).get(threadId);
+        if (!semaphore) {
+          return false;
+        }
+        return yield* semaphore.withPermit(
+          Effect.sync(() => {
+            const c = sessions.get(threadId);
+            return c !== undefined && !c.stopped;
+          }),
+        );
       });
 
     const stopAll: DevinAdapterShape["stopAll"] = () =>
-      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
+      Effect.gen(function* () {
+        yield* Ref.set(stoppingAllRef, true);
+        const threadIds = Array.from(ownedThreadIds);
+        yield* Effect.forEach(
+          threadIds,
+          (threadId) =>
+            withThreadLock(
+              threadId,
+              Effect.gen(function* () {
+                const ctx = sessions.get(threadId);
+                if (ctx) {
+                  yield* stopSessionInternal(ctx);
+                }
+              }),
+            ),
+          { discard: true },
+        );
+      }).pipe(Effect.ensuring(Ref.set(stoppingAllRef, false)));
 
     yield* Effect.addFinalizer(() =>
       Effect.ignore(stopAll()).pipe(

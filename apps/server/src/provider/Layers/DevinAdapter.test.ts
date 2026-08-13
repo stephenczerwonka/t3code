@@ -260,6 +260,260 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("restarts an idle Devin session that stops answering ACP requests", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-liveness-restart");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-idle-liveness-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const markerPath = NodePath.join(tempDir, "hang-list-after-prompt.marker");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_HANG_NEXT_LIST_TRIGGER_PATH: markerPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "200 millis",
+      });
+
+      yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.timeout("10 seconds"));
+      yield* Effect.promise(() => NodeFSP.writeFile(markerPath, "hang", "utf8"));
+      yield* Effect.sleep("1100 millis");
+      yield* adapter
+        .sendTurn({ threadId, input: "prompt after idle wedge", attachments: [] })
+        .pipe(Effect.timeout("10 seconds"));
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const methods = requests.map((request) => request.method);
+      const promptIndexes = methods.flatMap((method, index) =>
+        method === "session/prompt" ? [index] : [],
+      );
+      const loadIndex = methods.indexOf("session/load");
+
+      assert.equal(methods.filter((method) => method === "initialize").length, 2);
+      assert.equal(methods.filter((method) => method === "session/list").length, 1);
+      assert.equal(promptIndexes.length, 1);
+      assert.equal(methods.filter((method) => method === "session/load").length, 1);
+      assert.isBelow(loadIndex, promptIndexes[0] ?? -1);
+      const sessions = yield* adapter.listSessions();
+      const session = sessions.find((candidate) => candidate.threadId === threadId);
+      assert.equal(session?.model, "grok-build");
+      assert.equal(session?.runtimeMode, "full-access");
+      assert.deepEqual(session?.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+
+      yield* adapter.stopSession(threadId).pipe(Effect.timeout("10 seconds"));
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("reuses an idle Devin session when its liveness probe responds", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-liveness-healthy");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-idle-healthy-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "200 millis",
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.sleep("1100 millis");
+      yield* adapter.sendTurn({ threadId, input: "first healthy prompt", attachments: [] });
+      yield* Effect.sleep("1100 millis");
+      yield* adapter.sendTurn({ threadId, input: "second healthy prompt", attachments: [] });
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const methods = requests.map((request) => request.method);
+      assert.equal(methods.filter((method) => method === "initialize").length, 1);
+      assert.equal(methods.filter((method) => method === "session/list").length, 2);
+      assert.equal(methods.filter((method) => method === "session/prompt").length, 2);
+      assert.notInclude(methods, "session/load");
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("does not dispatch a prompt when Stop arrives during a hanging liveness probe", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-liveness-cancel");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-idle-cancel-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const markerPath = NodePath.join(tempDir, "hang-list-after-prompt.marker");
+      const hangingListEnteredPath = NodePath.join(tempDir, "hanging-list-entered.marker");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_HANG_NEXT_LIST_TRIGGER_PATH: markerPath,
+          T3_ACP_HANGING_LIST_ENTERED_PATH: hangingListEnteredPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "500 millis",
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.promise(() => NodeFSP.writeFile(markerPath, "hang", "utf8"));
+      yield* Effect.sleep("1100 millis");
+      const secondTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "cancel before dispatch", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* waitForFileContent(hangingListEnteredPath, 80, "entered");
+      yield* adapter.interruptTurn(threadId).pipe(Effect.timeout("5 seconds"));
+      yield* Fiber.join(secondTurnFiber).pipe(Effect.ignore, Effect.timeout("5 seconds"));
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequests = requests.filter((request) => request.method === "session/prompt");
+      assert.equal(promptRequests.length, 0);
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("emits a terminal session event when idle recovery cannot load the session", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-liveness-load-failure");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-idle-load-failure-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const markerPath = NodePath.join(tempDir, "hang-list-after-prompt.marker");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_HANG_NEXT_LIST_TRIGGER_PATH: markerPath,
+          T3_ACP_FAIL_LOAD_SESSION: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "200 millis",
+      });
+      const sessionExited =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "session.exited" }>>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.exited"
+          ? Deferred.succeed(sessionExited, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.promise(() => NodeFSP.writeFile(markerPath, "hang", "utf8"));
+      yield* Effect.sleep("1100 millis");
+      yield* adapter
+        .sendTurn({ threadId, input: "fail the idle recovery", attachments: [] })
+        .pipe(Effect.flip, Effect.timeout("10 seconds"));
+
+      const exited = yield* Deferred.await(sessionExited).pipe(Effect.timeout("2 seconds"));
+      assert.equal(exited.payload.exitKind, "error");
+      assert.isTrue(exited.payload.recoverable);
+      assert.isEmpty(yield* adapter.listSessions());
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(requests.filter((request) => request.method === "session/prompt").length, 0);
+      assert.equal(requests.filter((request) => request.method === "session/load").length, 1);
+
+      yield* Fiber.interrupt(eventsFiber);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("does not respawn an idle Devin session while stopAll is running", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-idle-liveness-stop-all");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-acp-idle-stop-all-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const markerPath = NodePath.join(tempDir, "hang-list-after-prompt.marker");
+      const hangingListEnteredPath = NodePath.join(tempDir, "hanging-list-entered.marker");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_HANG_NEXT_LIST_TRIGGER_PATH: markerPath,
+          T3_ACP_HANGING_LIST_ENTERED_PATH: hangingListEnteredPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "500 millis",
+      });
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const sessionExited = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)).pipe(
+          Effect.andThen(
+            event.type === "session.exited"
+              ? Deferred.succeed(sessionExited, undefined).pipe(Effect.ignore)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.promise(() => NodeFSP.writeFile(markerPath, "hang", "utf8"));
+      yield* Effect.sleep("1100 millis");
+      const secondTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "do not dispatch after shutdown", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* waitForFileContent(hangingListEnteredPath, 80, "entered");
+      yield* adapter.stopAll().pipe(Effect.timeout("5 seconds"));
+      yield* Fiber.join(secondTurnFiber).pipe(Effect.ignore, Effect.timeout("5 seconds"));
+      yield* Deferred.await(sessionExited).pipe(Effect.timeout("2 seconds"));
+
+      assert.isEmpty(yield* adapter.listSessions());
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(requests.filter((request) => request.method === "initialize").length, 1);
+      assert.equal(requests.filter((request) => request.method === "session/load").length, 0);
+      assert.equal(requests.filter((request) => request.method === "session/prompt").length, 0);
+      const exitEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "session.exited" }> =>
+          event.type === "session.exited",
+      );
+      assert.lengthOf(exitEvents, 1);
+      assert.equal(exitEvents[0]?.payload.exitKind, "graceful");
+
+      yield* Fiber.interrupt(eventsFiber);
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("applies negotiated plan and default modes before Devin prompts", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-interaction-mode");
@@ -478,6 +732,35 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       const exitLog = yield* waitForFileContent(exitLogPath);
       assert.include(exitLog, "SIGTERM");
     }),
+  );
+
+  it.effect("force kills an ACP child that ignores graceful termination", () =>
+    Effect.gen(function* () {
+      if (NodeOS.platform() === "win32") return;
+      const threadId = ThreadId.make("devin-stop-session-force-kill");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "devin-adapter-force-kill-")),
+      );
+      const exitLogPath = NodePath.join(tempDir, "exit.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_EXIT_LOG_PATH: exitLogPath,
+          T3_ACP_IGNORE_SIGTERM: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.stopSession(threadId).pipe(Effect.timeout("5 seconds"));
+
+      const exitLog = yield* waitForFileContent(exitLogPath);
+      assert.include(exitLog, "SIGTERM");
+    }).pipe(TestClock.withLive),
   );
 
   it.effect("reports a Devin session running only while the prompt is in flight", () =>
@@ -905,7 +1188,10 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
           T3_ACP_PROMPT_DELAY_MS: "400",
         }),
       );
-      const adapter = yield* makeTestAdapter(wrapperPath);
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        idleLivenessProbeAfter: "1 second",
+        idleLivenessProbeTimeout: "200 millis",
+      });
 
       const runtimeEvents: ProviderRuntimeEvent[] = [];
       const startedTurnIds: TurnId[] = [];
@@ -942,6 +1228,7 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
         runtimeMode: "full-access",
       });
 
+      yield* Effect.sleep("1100 millis");
       const firstSendTurnFiber = yield* adapter
         .sendTurn({ threadId, input: "first turn", attachments: [] })
         .pipe(Effect.forkChild);
@@ -974,6 +1261,8 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       );
       assert.equal(readySession?.status, "ready");
       assert.isUndefined(readySession?.activeTurnId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(requests.filter((request) => request.method === "session/list").length, 1);
 
       yield* Fiber.interrupt(runtimeEventsFiber);
       yield* adapter.stopSession(threadId);
