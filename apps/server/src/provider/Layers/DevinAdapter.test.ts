@@ -23,6 +23,7 @@ import {
   ThreadId,
   TurnId,
   type ProviderRuntimeEvent,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
@@ -365,6 +366,33 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       );
 
       yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("publishes ACP provider command snapshots", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-provider-commands");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_AVAILABLE_COMMANDS: "1" }),
+      );
+      const commands = yield* Deferred.make<ReadonlyArray<ServerProviderSlashCommand>>();
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        onSlashCommandsChanged: (next) => Deferred.succeed(commands, next).pipe(Effect.asVoid),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "show commands", attachments: [] });
+
+      assert.deepStrictEqual(yield* Deferred.await(commands), [
+        { name: "btw", description: "Ask in the background", input: { hint: "message" } },
+        { name: "loop", description: "Run repeatedly" },
+      ]);
       yield* adapter.stopSession(threadId);
     }),
   );

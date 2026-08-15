@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   RuntimeRequestId,
   type RuntimeMode,
+  type ServerProviderSlashCommand,
   type ThreadTokenUsageSnapshot,
   type ThreadId,
   TurnId,
@@ -98,6 +99,9 @@ export interface DevinAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  readonly onSlashCommandsChanged?: (
+    commands: ReadonlyArray<ServerProviderSlashCommand>,
+  ) => Effect.Effect<void>;
   readonly idleLivenessProbeAfter?: Duration.Input;
   readonly idleLivenessProbeTimeout?: Duration.Input;
 }
@@ -973,6 +977,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 }
 
                 if (event._tag === "ModeChanged") {
+                  return;
+                }
+
+                if (event._tag === "AvailableCommandsUpdated") {
+                  yield* options?.onSlashCommandsChanged?.(event.commands) ?? Effect.void;
                   return;
                 }
 

@@ -1,10 +1,18 @@
-import { DevinSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import {
+  DevinSettings,
+  ProviderDriverKind,
+  type ServerProvider,
+  type ServerProviderSlashCommand,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -91,6 +99,11 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const slashCommandsRef = yield* Ref.make<ReadonlyArray<ServerProviderSlashCommand>>([]);
+      const slashCommandChanges = yield* Effect.acquireRelease(
+        PubSub.unbounded<ReadonlyArray<ServerProviderSlashCommand>>(),
+        PubSub.shutdown,
+      );
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -112,6 +125,11 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
+        onSlashCommandsChanged: (commands) =>
+          Ref.set(slashCommandsRef, commands).pipe(
+            Effect.andThen(PubSub.publish(slashCommandChanges, commands)),
+            Effect.asVoid,
+          ),
       });
       const textGeneration = yield* makeDevinTextGeneration(effectiveConfig, processEnv);
 
@@ -130,13 +148,25 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
         initialSnapshot: (settings) =>
           buildInitialDevinProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
         checkProvider,
-        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          enrichDevinSnapshot({
-            snapshot: currentSnapshot,
-            maintenanceCapabilities,
-            enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-            publishSnapshot,
-            httpClient,
+        enrichSnapshot: ({ settings, snapshot: currentSnapshot, getSnapshot, publishSnapshot }) =>
+          Effect.gen(function* () {
+            yield* enrichDevinSnapshot({
+              snapshot: currentSnapshot,
+              maintenanceCapabilities,
+              enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+              publishSnapshot,
+              httpClient,
+            });
+            const publishSlashCommands = (
+              slashCommands: ReadonlyArray<ServerProviderSlashCommand>,
+            ) =>
+              getSnapshot.pipe(
+                Effect.flatMap((latest) => publishSnapshot({ ...latest, slashCommands })),
+              );
+            yield* publishSlashCommands(yield* Ref.get(slashCommandsRef));
+            yield* Stream.fromPubSub(slashCommandChanges).pipe(
+              Stream.runForEach(publishSlashCommands),
+            );
           }),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(

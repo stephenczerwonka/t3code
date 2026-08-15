@@ -7,6 +7,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
 import type {
   RuntimeContentStreamKind,
+  ServerProviderSlashCommand,
   ThreadTokenUsageSnapshot,
   ToolLifecycleItemType,
 } from "@t3tools/contracts";
@@ -115,6 +116,11 @@ export type AcpParsedSessionEvent =
       readonly rawPayload: unknown;
     }
   | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly commands: ReadonlyArray<ServerProviderSlashCommand>;
+      readonly rawPayload: unknown;
+    }
+  | {
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -193,6 +199,30 @@ export function acpTokenUsageEqual(
   right: ThreadTokenUsageSnapshot | undefined,
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function normalizeAcpAvailableCommands(
+  commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const commandsByName = new Map<string, ServerProviderSlashCommand>();
+  for (const command of commands) {
+    const name = command.name.trim().replace(/^\/+/, "");
+    if (!name) continue;
+    const description = command.description.trim() || undefined;
+    const hint = command.input?.hint.trim() || undefined;
+    const key = name.toLowerCase();
+    const existing = commandsByName.get(key);
+    commandsByName.set(key, {
+      name: existing?.name ?? name,
+      ...((existing?.description ?? description)
+        ? { description: existing?.description ?? description }
+        : {}),
+      ...((existing?.input?.hint ?? hint)
+        ? { input: { hint: existing?.input?.hint ?? hint! } }
+        : {}),
+    });
+  }
+  return [...commandsByName.values()];
 }
 
 export function extractModelConfigId(sessionResponse: AcpSessionSetupResponse): string | undefined {
@@ -643,6 +673,14 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       events.push({
         _tag: "UsageUpdated",
         usage: upd,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "available_commands_update": {
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        commands: normalizeAcpAvailableCommands(upd.availableCommands),
         rawPayload: params,
       });
       break;

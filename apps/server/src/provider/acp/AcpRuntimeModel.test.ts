@@ -6,6 +6,7 @@ import {
   extractModelConfigId,
   mergeToolCallState,
   normalizeAcpPromptUsage,
+  normalizeAcpAvailableCommands,
   normalizeAcpUsageUpdate,
   parsePermissionRequest,
   parseSessionModeState,
@@ -304,6 +305,20 @@ describe("AcpRuntimeModel", () => {
     });
 
     expect(normalizeAcpUsageUpdate({ used: 120, size: 100 }, final)).toBeUndefined();
+  });
+
+  it("normalizes and deduplicates ACP provider commands", () => {
+    expect(
+      normalizeAcpAvailableCommands([
+        { name: " /btw ", description: "", input: { hint: " message " } },
+        { name: "BTW", description: "Ask in the background", input: null },
+        { name: " loop ", description: "Run repeatedly" },
+        { name: " / ", description: "ignored" },
+      ]),
+    ).toEqual([
+      { name: "btw", description: "Ask in the background", input: { hint: "message" } },
+      { name: "loop", description: "Run repeatedly" },
+    ]);
   });
 
   it("projects typed ACP plan and content updates", () => {
