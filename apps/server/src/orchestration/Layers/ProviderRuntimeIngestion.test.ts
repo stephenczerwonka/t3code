@@ -3023,6 +3023,36 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("keeps zero-token context updates after compaction", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "thread.token-usage.updated",
+      eventId: asEventId("evt-thread-token-usage-zero"),
+      provider: ProviderDriverKind.make("devin"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        usage: {
+          usedTokens: 0,
+          totalProcessedTokens: 420,
+          maxTokens: 200_000,
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+      ),
+    );
+    expect(
+      thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+      )?.payload,
+    ).toMatchObject({ usedTokens: 0, totalProcessedTokens: 420, maxTokens: 200_000 });
+  });
+
   it("projects Codex camelCase token usage payloads into normalized thread activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

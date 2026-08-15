@@ -318,6 +318,57 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("merges live and final ACP token usage without duplicate snapshots", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-token-usage");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_USAGE: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const events: ProviderRuntimeEvent[] = [];
+      const completed = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => events.push(event)).pipe(
+          Effect.andThen(
+            event.type === "turn.completed" ? Deferred.succeed(completed, undefined) : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "report usage", attachments: [] });
+      yield* Deferred.await(completed);
+
+      const usageEvents = events.filter((event) => event.type === "thread.token-usage.updated");
+      assert.lengthOf(usageEvents, 2);
+      assert.deepStrictEqual(usageEvents[0]?.payload.usage, {
+        usedTokens: 100,
+        maxTokens: 200_000,
+      });
+      assert.deepStrictEqual(usageEvents[1]?.payload.usage, {
+        usedTokens: 100,
+        maxTokens: 200_000,
+        totalProcessedTokens: 420,
+        inputTokens: 300,
+        outputTokens: 100,
+        reasoningOutputTokens: 20,
+        cachedInputTokens: 50,
+      });
+      assert.isBelow(
+        events.indexOf(usageEvents[1]!),
+        events.findIndex((event) => event.type === "turn.completed"),
+      );
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("reuses an idle Devin session when its liveness probe responds", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-idle-liveness-healthy");

@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   RuntimeRequestId,
   type RuntimeMode,
+  type ThreadTokenUsageSnapshot,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -63,7 +64,12 @@ import {
   makeAcpRequestResolvedEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
-import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import {
+  acpTokenUsageEqual,
+  normalizeAcpPromptUsage,
+  normalizeAcpUsageUpdate,
+  parsePermissionRequest,
+} from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   applyDevinAcpInteractionMode,
@@ -143,6 +149,7 @@ interface DevinSessionContext {
    * the active one. */
   inFlightTurnIds: Array<TurnId>;
   currentModelId: string | undefined;
+  lastTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastPromptSettledAtMillis: number;
   stopped: boolean;
 }
@@ -354,6 +361,25 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+
+    const emitTokenUsage = Effect.fn("emitDevinTokenUsage")(function* (
+      ctx: DevinSessionContext,
+      turnId: TurnId | undefined,
+      usage: ThreadTokenUsageSnapshot | undefined,
+    ) {
+      if (usage === undefined || acpTokenUsageEqual(ctx.lastTokenUsage, usage)) {
+        return;
+      }
+      ctx.lastTokenUsage = usage;
+      yield* offerRuntimeEvent({
+        type: "thread.token-usage.updated",
+        ...(yield* makeEventStamp()),
+        provider: PROVIDER,
+        threadId: ctx.threadId,
+        turnId,
+        payload: { usage },
+      });
+    });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -925,6 +951,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             interruptedTurnIds: new Set(),
             inFlightTurnIds: [],
             currentModelId: boundModelId,
+            lastTokenUsage: undefined,
             lastPromptSettledAtMillis: yield* Clock.currentTimeMillis,
             stopped: false,
           };
@@ -939,6 +966,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 if (
                   event._tag === "PlanUpdated" ||
                   event._tag === "ToolCallUpdated" ||
+                  event._tag === "UsageUpdated" ||
                   event._tag === "ContentDelta"
                 ) {
                   yield* logNative(ctx.threadId, "session/update", event.rawPayload);
@@ -1004,6 +1032,13 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                         toolCall: event.toolCall,
                         rawPayload: event.rawPayload,
                       }),
+                    );
+                    return;
+                  case "UsageUpdated":
+                    yield* emitTokenUsage(
+                      ctx,
+                      notificationTurnId,
+                      normalizeAcpUsageUpdate(event.usage, ctx.lastTokenUsage),
                     );
                     return;
                   case "ContentDelta":
@@ -1427,6 +1462,13 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               }
 
               appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
+              if (result.usage) {
+                yield* emitTokenUsage(
+                  ctx,
+                  prepared.turnId,
+                  normalizeAcpPromptUsage(result.usage, ctx.lastTokenUsage),
+                );
+              }
               ctx.inFlightTurnIds = ctx.inFlightTurnIds.filter((id) => id !== prepared.turnId);
               const completedStopReason = completedStopReasonFromPromptResponse(result);
               // Each prompt settles its own turn. When turns are queued behind

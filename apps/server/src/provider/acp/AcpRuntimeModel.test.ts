@@ -5,6 +5,8 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import {
   extractModelConfigId,
   mergeToolCallState,
+  normalizeAcpPromptUsage,
+  normalizeAcpUsageUpdate,
   parsePermissionRequest,
   parseSessionModeState,
   parseSessionUpdateEvent,
@@ -271,6 +273,37 @@ describe("AcpRuntimeModel", () => {
         modeId: "code",
       },
     ]);
+  });
+
+  it("normalizes live and final ACP usage without losing compacted active context", () => {
+    const live = normalizeAcpUsageUpdate({
+      used: 0,
+      size: 200_000,
+    });
+    expect(live).toEqual({ usedTokens: 0, maxTokens: 200_000 });
+
+    const final = normalizeAcpPromptUsage(
+      {
+        totalTokens: 420,
+        inputTokens: 300,
+        outputTokens: 100,
+        thoughtTokens: 20,
+        cachedReadTokens: 50,
+        cachedWriteTokens: 10,
+      },
+      live,
+    );
+    expect(final).toEqual({
+      usedTokens: 0,
+      maxTokens: 200_000,
+      totalProcessedTokens: 420,
+      inputTokens: 300,
+      outputTokens: 100,
+      reasoningOutputTokens: 20,
+      cachedInputTokens: 50,
+    });
+
+    expect(normalizeAcpUsageUpdate({ used: 120, size: 100 }, final)).toBeUndefined();
   });
 
   it("projects typed ACP plan and content updates", () => {

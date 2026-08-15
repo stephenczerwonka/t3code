@@ -25,6 +25,7 @@ const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION ===
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const emitInterleavedThoughts = process.env.T3_ACP_EMIT_INTERLEAVED_THOUGHTS === "1";
+const emitUsage = process.env.T3_ACP_EMIT_USAGE === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
@@ -965,6 +966,27 @@ const program = Effect.gen(function* () {
           content: { type: "text", text: promptResponseText ?? "hello from mock" },
         },
       });
+
+      if (emitUsage) {
+        const update = {
+          sessionUpdate: "usage_update" as const,
+          used: 100,
+          size: 200_000,
+        };
+        yield* agent.client.sessionUpdate({ sessionId: requestedSessionId, update });
+        yield* agent.client.sessionUpdate({ sessionId: requestedSessionId, update });
+        return {
+          stopReason: "end_turn",
+          usage: {
+            totalTokens: 420,
+            inputTokens: 300,
+            outputTokens: 100,
+            thoughtTokens: 20,
+            cachedReadTokens: 50,
+            cachedWriteTokens: 10,
+          },
+        };
+      }
 
       return { stopReason: "end_turn" };
     }),
