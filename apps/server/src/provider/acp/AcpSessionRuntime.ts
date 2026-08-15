@@ -336,11 +336,16 @@ type AcpStartState =
 interface AcpAssistantSegmentState {
   readonly nextSegmentIndex: number;
   readonly activeItemId?: string;
+  readonly activeStreamKind?: "assistant_text" | "reasoning_text";
 }
 
 interface EnsureActiveAssistantSegmentResult {
   readonly itemId: string;
   readonly startedEvent?: Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>;
+  readonly completedEvent?: Extract<
+    AcpParsedSessionEvent,
+    { readonly _tag: "AssistantItemCompleted" }
+  >;
 }
 
 export const make = (
@@ -1044,7 +1049,10 @@ const handleSessionUpdate = ({
       if (event._tag === "ContentDelta") {
         if (event.text.trim().length === 0) {
           const assistantSegmentState = yield* Ref.get(assistantSegmentRef);
-          if (!assistantSegmentState.activeItemId) {
+          if (
+            !assistantSegmentState.activeItemId ||
+            assistantSegmentState.activeStreamKind !== event.streamKind
+          ) {
             continue;
           }
         }
@@ -1053,6 +1061,7 @@ const handleSessionUpdate = ({
           assistantSegmentRef,
           sessionId: params.sessionId,
           assistantItemRuntimeId,
+          streamKind: event.streamKind,
         });
         yield* Queue.offer(queue, {
           ...event,
@@ -1098,39 +1107,58 @@ const ensureActiveAssistantSegment = ({
   assistantSegmentRef,
   sessionId,
   assistantItemRuntimeId,
+  streamKind,
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
   readonly assistantItemRuntimeId: string;
+  readonly streamKind: "assistant_text" | "reasoning_text";
 }) =>
   Ref.modify<AcpAssistantSegmentState, EnsureActiveAssistantSegmentResult>(
     assistantSegmentRef,
     (current) => {
-      if (current.activeItemId) {
+      if (current.activeItemId && current.activeStreamKind === streamKind) {
         return [{ itemId: current.activeItemId }, current] as const;
       }
       const itemId = assistantItemId(sessionId, assistantItemRuntimeId, current.nextSegmentIndex);
+      const completedEvent = current.activeItemId
+        ? ({
+            _tag: "AssistantItemCompleted",
+            itemId: current.activeItemId,
+            streamKind: current.activeStreamKind ?? "assistant_text",
+          } satisfies AcpParsedSessionEvent)
+        : undefined;
       return [
         {
           itemId,
+          ...(completedEvent ? { completedEvent } : {}),
           startedEvent: {
             _tag: "AssistantItemStarted",
             itemId,
+            streamKind,
           } satisfies Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>,
         },
         {
           nextSegmentIndex: current.nextSegmentIndex + 1,
           activeItemId: itemId,
+          activeStreamKind: streamKind,
         } satisfies AcpAssistantSegmentState,
       ] as const;
     },
   ).pipe(
-    Effect.flatMap((result) =>
-      result.startedEvent
-        ? Queue.offer(queue, result.startedEvent).pipe(Effect.as(result.itemId))
-        : Effect.succeed(result.itemId),
-    ),
+    Effect.flatMap((result) => {
+      const startedEvent = result.startedEvent;
+      return startedEvent
+        ? Effect.gen(function* () {
+            if (result.completedEvent) {
+              yield* Queue.offer(queue, result.completedEvent);
+            }
+            yield* Queue.offer(queue, startedEvent);
+            return result.itemId;
+          })
+        : Effect.succeed(result.itemId);
+    }),
   );
 
 const closeActiveAssistantSegment = ({
@@ -1148,6 +1176,7 @@ const closeActiveAssistantSegment = ({
       {
         _tag: "AssistantItemCompleted",
         itemId: current.activeItemId,
+        streamKind: current.activeStreamKind ?? "assistant_text",
       } satisfies AcpParsedSessionEvent,
       {
         nextSegmentIndex: current.nextSegmentIndex,

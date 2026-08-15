@@ -228,6 +228,53 @@ describe("AcpSessionRuntime", () => {
     }).pipe(Effect.provide(NodeServices.layer));
   });
 
+  it.effect("keeps interleaved reasoning and assistant segments stable and distinct", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "think" }] });
+
+      const events = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 10)));
+      const deltas = events.filter((event) => event._tag === "ContentDelta");
+      expect(deltas.map((event) => [event.streamKind, event.text])).toEqual([
+        ["reasoning_text", "reasoning one"],
+        ["reasoning_text", " and two"],
+        ["assistant_text", "answer"],
+        ["reasoning_text", "final thought"],
+      ]);
+      expect(deltas[0]?.itemId).toBe(deltas[1]?.itemId);
+      expect(deltas[2]?.itemId).not.toBe(deltas[0]?.itemId);
+      expect(deltas[3]?.itemId).not.toBe(deltas[2]?.itemId);
+      expect(events.map((event) => event._tag)).toEqual([
+        "AssistantItemStarted",
+        "ContentDelta",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_EMIT_INTERLEAVED_THOUGHTS: "1" },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("drops session updates emitted for a child ACP session", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
