@@ -81,6 +81,7 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  conversationRollback: "supported" | "unsupported" = "supported",
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
@@ -98,6 +99,7 @@ function createProviderServiceHarness(
             status: "ready",
             runtimeMode: "full-access",
             threadId: ThreadId.make("thread-1"),
+            providerInstanceId: ProviderInstanceId.make(providerName),
             cwd: sessionCwd,
             createdAt: now,
             updatedAt: now,
@@ -112,7 +114,8 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions,
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({ sessionModelSwitch: "in-session", conversationRollback }),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({
         instanceId,
@@ -147,13 +150,13 @@ async function waitForThread(
       readonly id: ThreadId;
       readonly latestTurn: { readonly turnId: string } | null;
       readonly checkpoints: ReadonlyArray<{ readonly checkpointTurnCount: number }>;
-      readonly activities: ReadonlyArray<{ readonly kind: string }>;
+      readonly activities: ReadonlyArray<{ readonly kind: string; readonly payload?: unknown }>;
     }>;
   }>,
   predicate: (thread: {
     latestTurn: { turnId: string } | null;
     checkpoints: ReadonlyArray<{ checkpointTurnCount: number }>;
-    activities: ReadonlyArray<{ kind: string }>;
+    activities: ReadonlyArray<{ kind: string; payload?: unknown }>;
   }) => boolean,
   timeoutMs = 15_000,
 ) {
@@ -161,7 +164,7 @@ async function waitForThread(
   const poll = async (): Promise<{
     latestTurn: { turnId: string } | null;
     checkpoints: ReadonlyArray<{ checkpointTurnCount: number }>;
-    activities: ReadonlyArray<{ kind: string }>;
+    activities: ReadonlyArray<{ kind: string; payload?: unknown }>;
   }> => {
     const snapshot = await readModel();
     const thread = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
@@ -284,6 +287,7 @@ describe("CheckpointReactor", () => {
     readonly localStatusRefName?: string | null;
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
+    readonly conversationRollback?: "supported" | "unsupported";
     readonly gitStatusRefreshCalls?: Array<string>;
   }) {
     const cwd = createGitRepository();
@@ -293,6 +297,7 @@ describe("CheckpointReactor", () => {
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      options?.conversationRollback ?? "supported",
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -1149,6 +1154,66 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
     });
+  });
+
+  it("rejects Devin revert before restoring the filesystem", async () => {
+    const harness = await createHarness({
+      providerName: ProviderDriverKind.make("devin"),
+      conversationRollback: "unsupported",
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-diff-devin-1"),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-devin-1"),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-diff-devin-2"),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-devin-2"),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 2,
+        createdAt,
+      }),
+    );
+
+    const before = NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-revert-request-devin"),
+        threadId: ThreadId.make("thread-1"),
+        turnCount: 1,
+        createdAt,
+      }),
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.revert.failed"),
+    );
+    expect(
+      thread.activities.find((activity) => activity.kind === "checkpoint.revert.failed")?.payload,
+    ).toEqual({
+      turnCount: 1,
+      detail: "This provider cannot safely rewind conversation state.",
+    });
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe(before);
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
   });
 
   it("processes consecutive revert requests with deterministic rollback sequencing", async () => {

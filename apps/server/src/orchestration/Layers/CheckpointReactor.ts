@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   type ProjectId,
+  type ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -154,11 +155,21 @@ const make = Effect.gen(function* () {
 
   const resolveSessionRuntimeForThread = Effect.fn("resolveSessionRuntimeForThread")(function* (
     threadId: ThreadId,
-  ): Effect.fn.Return<Option.Option<{ readonly threadId: ThreadId; readonly cwd: string }>> {
+  ): Effect.fn.Return<
+    Option.Option<{
+      readonly threadId: ThreadId;
+      readonly cwd: string;
+      readonly providerInstanceId: ProviderInstanceId | undefined;
+    }>
+  > {
     const sessions = yield* providerService.listSessions();
     const session = sessions.find((entry) => entry.threadId === threadId);
     return session?.cwd
-      ? Option.some({ threadId: session.threadId, cwd: session.cwd })
+      ? Option.some({
+          threadId: session.threadId,
+          cwd: session.cwd,
+          providerInstanceId: session.providerInstanceId,
+        })
       : Option.none();
   });
 
@@ -755,6 +766,31 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
+    if (rolledBackTurns > 0) {
+      if (!sessionRuntime.value.providerInstanceId) {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: "The active provider session cannot be identified for a safe rewind.",
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+      const capabilities = yield* providerService.getCapabilities(
+        sessionRuntime.value.providerInstanceId,
+      );
+      if (capabilities.conversationRollback === "unsupported") {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: "This provider cannot safely rewind conversation state.",
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+    }
+
     const restored = yield* checkpointStore.restoreCheckpoint({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
@@ -774,7 +810,6 @@ const make = Effect.gen(function* () {
     // reflects the reverted filesystem state.
     yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
-    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
       yield* providerService.rollbackConversation({
         threadId: sessionRuntime.value.threadId,

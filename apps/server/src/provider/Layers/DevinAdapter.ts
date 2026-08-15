@@ -1843,6 +1843,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
       capabilities: {
         sessionModelSwitch: "in-session",
         userInputActions: ["accept", "decline", "cancel"],
+        conversationRollback: "unsupported",
       },
       startSession,
       sendTurn,
