@@ -121,6 +121,10 @@ export type AcpParsedSessionEvent =
       readonly rawPayload: unknown;
     }
   | {
+      readonly _tag: "ConfigOptionsUpdated";
+      readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+    }
+  | {
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -682,6 +686,13 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         _tag: "AvailableCommandsUpdated",
         commands: normalizeAcpAvailableCommands(upd.availableCommands),
         rawPayload: params,
+      });
+      break;
+    }
+    case "config_option_update": {
+      events.push({
+        _tag: "ConfigOptionsUpdated",
+        configOptions: upd.configOptions,
       });
       break;
     }

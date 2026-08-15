@@ -397,6 +397,69 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("keeps the initiating turn on a late known tool completion", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-late-tool");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_LATE_TOOL_COMPLETION: "1" }),
+      );
+      const completedTool =
+        yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "item.completed" }>>();
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "item.completed"
+          ? Deferred.succeed(completedTool, event).pipe(Effect.asVoid)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({ threadId, input: "check later", attachments: [] });
+      const completed = yield* Deferred.await(completedTool);
+      assert.equal(completed.turnId, turn.turnId);
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("publishes late session usage without inventing a turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-late-usage");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_LATE_USAGE: "1" }),
+      );
+      const usage =
+        yield* Deferred.make<
+          Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>
+        >();
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "thread.token-usage.updated"
+          ? Deferred.succeed(usage, event).pipe(Effect.asVoid)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "report later", attachments: [] });
+      const event = yield* Deferred.await(usage);
+      assert.isUndefined(event.turnId);
+      assert.deepStrictEqual(event.payload.usage, { usedTokens: 12, maxTokens: 200_000 });
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("reuses an idle Devin session when its liveness probe responds", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-idle-liveness-healthy");

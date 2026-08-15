@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalTimersInEffect:off
 import * as NodeFS from "node:fs";
 
 import * as Effect from "effect/Effect";
@@ -27,6 +28,9 @@ const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATE
 const emitInterleavedThoughts = process.env.T3_ACP_EMIT_INTERLEAVED_THOUGHTS === "1";
 const emitUsage = process.env.T3_ACP_EMIT_USAGE === "1";
 const emitAvailableCommands = process.env.T3_ACP_EMIT_AVAILABLE_COMMANDS === "1";
+const emitConfigOptionUpdate = process.env.T3_ACP_EMIT_CONFIG_OPTION_UPDATE === "1";
+const emitLateToolCompletion = process.env.T3_ACP_EMIT_LATE_TOOL_COMPLETION === "1";
+const emitLateUsage = process.env.T3_ACP_EMIT_LATE_USAGE === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
@@ -952,6 +956,64 @@ const program = Effect.gen(function* () {
             ],
           },
         });
+      }
+
+      if (emitConfigOptionUpdate) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "config_option_update",
+            configOptions: [
+              {
+                id: "mode",
+                name: "Mode",
+                category: "mode",
+                type: "select",
+                currentValue: "architect",
+                options: [{ value: "architect", name: "Architect" }],
+              },
+            ],
+          },
+        });
+      }
+
+      if (emitLateToolCompletion) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "late-tool-1",
+            title: "Background check",
+            kind: "execute",
+            status: "pending",
+            rawInput: { command: "check-background" },
+          },
+        });
+        yield* Effect.sync(() => {
+          setTimeout(() => {
+            writeJsonRpcNotification("session/update", {
+              sessionId: requestedSessionId,
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId: "late-tool-1",
+                status: "completed",
+              },
+            });
+          }, 25);
+        });
+        return { stopReason: "end_turn" };
+      }
+
+      if (emitLateUsage) {
+        yield* Effect.sync(() => {
+          setTimeout(() => {
+            writeJsonRpcNotification("session/update", {
+              sessionId: requestedSessionId,
+              update: { sessionUpdate: "usage_update", used: 12, size: 200_000 },
+            });
+          }, 25);
+        });
+        return { stopReason: "end_turn" };
       }
 
       yield* agent.client.sessionUpdate({

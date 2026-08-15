@@ -321,6 +321,41 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("parses dynamic ACP config option snapshots", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "architect",
+            options: [{ value: "architect", name: "Architect" }],
+          },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "ConfigOptionsUpdated",
+        configOptions: [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "architect",
+            options: [{ value: "architect", name: "Architect" }],
+          },
+        ],
+      },
+    ]);
+  });
+
   it("projects typed ACP plan and content updates", () => {
     const planResult = parseSessionUpdateEvent({
       sessionId: "session-1",

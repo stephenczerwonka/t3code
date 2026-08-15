@@ -139,6 +139,7 @@ interface DevinSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
+  readonly toolTurnIds: Map<string, TurnId>;
   readonly promptConfigurationSemaphore: Semaphore.Semaphore;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
@@ -948,6 +949,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
+            toolTurnIds: new Map(),
             promptConfigurationSemaphore,
             turns: [],
             lastPlanFingerprint: undefined,
@@ -985,7 +987,20 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                   return;
                 }
 
-                const notificationTurnId = resolveNotificationTurnId(ctx);
+                const activeNotificationTurnId = resolveNotificationTurnId(ctx);
+                if (event._tag === "UsageUpdated") {
+                  yield* emitTokenUsage(
+                    ctx,
+                    activeNotificationTurnId,
+                    normalizeAcpUsageUpdate(event.usage, ctx.lastTokenUsage),
+                  );
+                  return;
+                }
+
+                const notificationTurnId =
+                  event._tag === "ToolCallUpdated"
+                    ? (activeNotificationTurnId ?? ctx.toolTurnIds.get(event.toolCall.toolCallId))
+                    : activeNotificationTurnId;
                 if (
                   notificationTurnId === undefined ||
                   ctx.interruptedTurnIds.has(notificationTurnId)
@@ -1032,6 +1047,14 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                     );
                     return;
                   case "ToolCallUpdated":
+                    if (
+                      event.toolCall.status === "completed" ||
+                      event.toolCall.status === "failed"
+                    ) {
+                      ctx.toolTurnIds.delete(event.toolCall.toolCallId);
+                    } else {
+                      ctx.toolTurnIds.set(event.toolCall.toolCallId, notificationTurnId);
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -1041,13 +1064,6 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                         toolCall: event.toolCall,
                         rawPayload: event.rawPayload,
                       }),
-                    );
-                    return;
-                  case "UsageUpdated":
-                    yield* emitTokenUsage(
-                      ctx,
-                      notificationTurnId,
-                      normalizeAcpUsageUpdate(event.usage, ctx.lastTokenUsage),
                     );
                     return;
                   case "ContentDelta":
