@@ -92,7 +92,7 @@ function describeRawFrame(
   return described.length > 0 ? described.slice(0, MAX_DESCRIBED_ENVELOPES) : undefined;
 }
 
-function summarizePayload(payload: unknown): Readonly<Record<string, unknown>> {
+export function summarizeAcpNativePayload(payload: unknown): Readonly<Record<string, unknown>> {
   if (payload === null) return { valueType: "null" };
   if (typeof payload === "string") {
     const messages = describeRawFrame(payload);
@@ -133,8 +133,8 @@ function formatRequestLogPayload(event: AcpSessionRuntime.AcpSessionRequestLogEv
   return {
     method: structuralMethod(event.method),
     status: event.status,
-    request: summarizePayload(event.payload),
-    ...(event.result !== undefined ? { result: summarizePayload(event.result) } : {}),
+    request: summarizeAcpNativePayload(event.payload),
+    ...(event.result !== undefined ? { result: summarizeAcpNativePayload(event.result) } : {}),
     ...(event.cause !== undefined
       ? {
           errorTag: causeErrorTag(event.cause),
@@ -148,7 +148,7 @@ function formatProtocolLogPayload(event: EffectAcpProtocol.AcpProtocolLogEvent) 
   return {
     direction: event.direction,
     stage: event.stage,
-    payload: summarizePayload(event.payload),
+    payload: summarizeAcpNativePayload(event.payload),
   };
 }
 

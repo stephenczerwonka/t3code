@@ -71,7 +71,7 @@ import {
   normalizeAcpUsageUpdate,
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
-import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { makeAcpNativeLoggerFactory, summarizeAcpNativePayload } from "../acp/AcpNativeLogging.ts";
 import {
   applyDevinAcpInteractionMode,
   applyDevinAcpModelSelection,
@@ -536,7 +536,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               createdAt: observedAt,
               method,
               threadId,
-              payload,
+              payload: summarizeAcpNativePayload(payload),
             },
           },
           threadId,

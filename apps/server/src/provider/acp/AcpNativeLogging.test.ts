@@ -9,12 +9,25 @@ import * as Schema from "effect/Schema";
 import * as AcpErrors from "effect-acp/errors";
 
 import type { EventNdjsonLogger } from "../Layers/EventNdjsonLogger.ts";
-import { makeAcpNativeLoggerFactory } from "./AcpNativeLogging.ts";
+import { makeAcpNativeLoggerFactory, summarizeAcpNativePayload } from "./AcpNativeLogging.ts";
 
 const nodeServicesIt = it.layer(NodeServices.layer);
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 nodeServicesIt("ACP native logging", (it) => {
+  it("summarizes extension notifications without recording raw content", () => {
+    const secret = "secret-cognition-output";
+    const summary = summarizeAcpNativePayload({
+      sessionId: "session-1",
+      message: secret,
+      nested: { token: secret },
+    });
+
+    const serialized = encodeUnknownJson(summary);
+    assert.notInclude(serialized, secret);
+    assert.deepStrictEqual(summary, { valueType: "object", fieldCount: 3 });
+  });
+
   it.effect("records bounded request and protocol diagnostics without raw payloads", () =>
     Effect.gen(function* () {
       const records: Array<unknown> = [];

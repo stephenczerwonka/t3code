@@ -196,6 +196,13 @@ it("falls back to a single-turn allowance when every persistent option escalates
 });
 
 it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
+  it.effect("declares provider conversation rollback unsupported", () =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTestAdapter("devin");
+      assert.equal(adapter.capabilities.conversationRollback, "unsupported");
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-mock-thread");
@@ -1185,7 +1192,7 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
         nativeEventLogger: {
           filePath: "memory://devin-cancelled-native-events",
           write: (record: unknown) =>
-            JSON.stringify(record).includes("late after cancel")
+            JSON.stringify(record).includes('"method":"session/update"')
               ? Deferred.succeed(lateNativeUpdate, undefined).pipe(Effect.asVoid)
               : Effect.void,
           close: () => Effect.void,

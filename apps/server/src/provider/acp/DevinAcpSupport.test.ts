@@ -18,12 +18,14 @@ import {
 } from "./DevinAcpSupport.ts";
 
 describe("DEVIN_ACP_CLIENT_CAPABILITIES", () => {
-  it("advertises form elicitation without URL, filesystem, or terminal support", () => {
+  it("advertises only implemented form elicitation host capabilities", () => {
     expect(DEVIN_ACP_CLIENT_CAPABILITIES).toEqual({
       elicitation: { form: {} },
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
     });
+    expect(Object.keys(DEVIN_ACP_CLIENT_CAPABILITIES)).toEqual(["elicitation", "fs", "terminal"]);
+    expect("_meta" in DEVIN_ACP_CLIENT_CAPABILITIES).toBe(false);
   });
 });
 
