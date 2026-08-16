@@ -33,6 +33,8 @@ const emitLateToolCompletion = process.env.T3_ACP_EMIT_LATE_TOOL_COMPLETION === 
 const emitLateUsage = process.env.T3_ACP_EMIT_LATE_USAGE === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
+const leaveToolActiveOnFirstPrompt = process.env.T3_ACP_LEAVE_TOOL_ACTIVE_ON_FIRST_PROMPT === "1";
+const hangSecondPromptForever = process.env.T3_ACP_HANG_SECOND_PROMPT_FOREVER === "1";
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
@@ -552,6 +554,24 @@ const program = Effect.gen(function* () {
       }
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
+        return yield* Effect.never;
+      }
+
+      if (leaveToolActiveOnFirstPrompt && promptCount === 1) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "stale-tool-1",
+            title: "Unsettled prior tool",
+            kind: "execute",
+            status: "pending",
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+
+      if (hangSecondPromptForever && promptCount === 2) {
         return yield* Effect.never;
       }
 

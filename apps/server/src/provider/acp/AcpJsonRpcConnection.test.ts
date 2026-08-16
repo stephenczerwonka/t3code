@@ -465,6 +465,54 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("does not carry active tool liveness into the next prompt", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      expect(
+        yield* runtime.prompt({
+          prompt: [{ type: "text", text: "leave a tool active" }],
+        }),
+      ).toMatchObject({ stopReason: "end_turn" });
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang without tools" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* TestClock.adjust("61 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 60s");
+        expect(error.detail).not.toContain("tool call");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_LEAVE_TOOL_ACTIVE_ON_FIRST_PROMPT: "1",
+              T3_ACP_HANG_SECOND_PROMPT_FOREVER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("segments assistant text around ACP tool calls", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

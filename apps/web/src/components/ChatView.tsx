@@ -4381,11 +4381,30 @@ function ChatViewContent(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  const continueFailedTurn = () => {
+    const sendContext = composerRef.current?.getSendContext();
+    if (!sendContext) return;
+    const { hasSendableContent } = deriveComposerSendState({
+      prompt: sendContext.prompt,
+      imageCount: sendContext.images.length,
+      terminalContexts: sendContext.terminalContexts,
+      elementContextCount:
+        sendContext.elementContexts.length +
+        sendContext.previewAnnotations.length +
+        sendContext.reviewComments.length,
+    });
+    if (
+      !hasSendableContent &&
+      !composerRef.current?.insertTextAtEnd("Continue from where you left off.")
+    ) {
+      return;
+    }
+    void onSend();
+  };
   // A turn that failed (transport error, provider crash, machine slept under
   // it) looks dead-ended, but the provider session survives with its resume
-  // cursor — the composer already continues it. Say so and offer a focus
-  // shortcut; the banner clears itself once a new turn is running.
-  const failedTurnBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+  // cursor. The banner clears itself once a new turn is running.
+  const failedTurnBannerItem: ComposerBannerStackItem | null = (() => {
     const sessionStatus = activeThread?.session?.status;
     const turnInFlight = sessionStatus === "starting" || sessionStatus === "running";
     if (activeThread?.latestTurn?.state !== "error" || turnInFlight) {
@@ -4398,12 +4417,12 @@ function ChatViewContent(props: ChatViewProps) {
       title: "The last turn failed before it finished",
       description: "The session can be resumed — send a message to continue where it left off.",
       actions: (
-        <Button size="xs" variant="outline" onClick={focusComposer}>
+        <Button size="xs" variant="outline" onClick={continueFailedTurn}>
           Continue
         </Button>
       ),
     };
-  }, [activeThread?.id, activeThread?.latestTurn, activeThread?.session?.status, focusComposer]);
+  })();
   // The stack renders items[0] front-most and tucks the rest behind hover, so
   // ordering is priority: urgent system banners (error/warning variants plus
   // calm-styled live states flagged `urgent`, like update progress), then
@@ -4825,13 +4844,13 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const onSend = async (
+  async function onSend(
     e?: { preventDefault: () => void },
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
-  ) => {
+  ) {
     e?.preventDefault();
     const notifyDirectAnnotationAttached = () => {
       if (!directAnnotation) return;
@@ -5276,7 +5295,7 @@ function ChatViewContent(props: ChatViewProps) {
       );
       resetLocalDispatch();
     }
-  };
+  }
 
   const onInterrupt = async () => {
     if (!activeThread) return;

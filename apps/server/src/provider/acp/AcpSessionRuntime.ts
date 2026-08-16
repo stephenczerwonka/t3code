@@ -891,6 +891,7 @@ export const make = (
               queue: eventQueue,
               assistantSegmentRef,
             });
+            yield* Ref.set(toolCallsRef, new Map());
             const requestPayload = {
               sessionId: started.sessionId,
               ...payload,
