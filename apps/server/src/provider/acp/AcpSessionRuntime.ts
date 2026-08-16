@@ -49,6 +49,7 @@ export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStre
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+const defaultAuthenticationTimeout = Duration.minutes(5);
 /**
  * A prompt turn has no bounded duration — a legitimate turn can think for
  * minutes without emitting anything. What is never legitimate is total silence
@@ -119,6 +120,8 @@ export interface AcpSpawnInput {
 }
 
 export interface AcpSessionRuntimeOptions {
+  /** Bounds interactive provider authentication so startup cannot remain pending indefinitely. */
+  readonly authenticationTimeout?: Duration.Input;
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
   readonly processForceKillAfter?: Duration.Input;
@@ -696,11 +699,24 @@ export const make = (
         ...(options.authenticateMeta ? { _meta: options.authenticateMeta } : {}),
       } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
+      const authenticationResult = yield* runLoggedRequest(
         "authenticate",
         authenticatePayload,
         acp.agent.authenticate(authenticatePayload),
+      ).pipe(
+        Effect.timeoutOption(
+          Duration.fromInputUnsafe(options.authenticationTimeout ?? defaultAuthenticationTimeout),
+        ),
       );
+      if (Option.isNone(authenticationResult)) {
+        return yield* new EffectAcpErrors.AcpTransportError({
+          operation: "call-rpc",
+          method: "authenticate",
+          detail:
+            "ACP authentication timed out because the provider did not complete authentication before the startup timeout expired.",
+          cause: undefined,
+        });
+      }
 
       let sessionId: string;
       let sessionSetupResult:

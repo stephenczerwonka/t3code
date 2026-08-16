@@ -27,7 +27,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { resolveDevinAcpBaseModelId } from "../acp/DevinAcpSupport.ts";
+import { hasDevinCredentials, resolveDevinAcpBaseModelId } from "../acp/DevinAcpSupport.ts";
 
 const DEVIN_PRESENTATION = {
   displayName: "Devin",
@@ -313,7 +313,9 @@ export const checkDevinProviderStatus = Effect.fn("checkDevinProviderStatus")(fu
       installed: true,
       version,
       status: "ready",
-      auth: { status: discoveredModels.length > 0 ? "authenticated" : "unknown" },
+      auth: {
+        status: hasDevinCredentials(devinSettings, environment) ? "authenticated" : "unknown",
+      },
       ...(discoveredModels.length === 0
         ? { message: "Devin is available, but T3 Code could not load its model catalog." }
         : {}),

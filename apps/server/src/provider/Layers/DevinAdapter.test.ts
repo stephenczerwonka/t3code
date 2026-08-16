@@ -268,6 +268,36 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
     }),
   );
 
+  it.effect("fails session startup when ACP authentication times out", () =>
+    Effect.gen(function* () {
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({
+          T3_ACP_HANG_AUTHENTICATION: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        authenticationTimeout: "50 millis",
+      });
+      const threadId = ThreadId.make("devin-auth-timeout");
+
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("devin"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("devin"), model: "devin-build" },
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag !== "ProviderAdapterRequestError") {
+        throw new Error("Unexpected error type");
+      }
+      assert.include(error.detail, "ACP authentication timed out");
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("restarts an idle Devin session that stops answering ACP requests", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("devin-idle-liveness-restart");

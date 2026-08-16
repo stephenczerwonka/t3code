@@ -102,6 +102,7 @@ export interface DevinAdapterLiveOptions {
   readonly onSlashCommandsChanged?: (
     commands: ReadonlyArray<ServerProviderSlashCommand>,
   ) => Effect.Effect<void>;
+  readonly authenticationTimeout?: Duration.Input;
   readonly idleLivenessProbeAfter?: Duration.Input;
   readonly idleLivenessProbeTimeout?: Duration.Input;
 }
@@ -677,6 +678,9 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
             devinSettings,
             ...(requestedStartModelId ? { model: requestedStartModelId } : {}),
             ...(options?.environment ? { environment: options.environment } : {}),
+            ...(options?.authenticationTimeout
+              ? { authenticationTimeout: options.authenticationTimeout }
+              : {}),
             childProcessSpawner,
             cwd,
             runtimeMode: input.runtimeMode,

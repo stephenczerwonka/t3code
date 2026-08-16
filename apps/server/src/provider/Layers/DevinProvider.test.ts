@@ -139,9 +139,9 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
     }),
   );
 
-  it.effect("loads model variants from the CLI catalog", () =>
+  it.effect("loads model variants without treating the catalog as authentication proof", () =>
     Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
+      const snapshots = yield* Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
@@ -168,17 +168,26 @@ it.layer(NodeServices.layer)("checkDevinProviderStatus", (it) => {
           yield* fs.writeFileString(devinPath, fake.content);
           yield* fs.chmod(devinPath, 0o755);
 
-          return yield* checkDevinProviderStatus(
-            decodeDevinSettings({ enabled: true, binaryPath: devinPath }),
-            {},
-          );
+          return yield* Effect.all({
+            withoutCredentials: checkDevinProviderStatus(
+              decodeDevinSettings({ enabled: true, binaryPath: devinPath }),
+              {},
+            ),
+            withCredentials: checkDevinProviderStatus(
+              decodeDevinSettings({ enabled: true, binaryPath: devinPath, apiKey: "configured" }),
+              {},
+            ),
+          });
         }),
       );
 
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.models.map((model) => model.slug)).toEqual(["claude-sonnet-5-high"]);
+      expect(snapshots.withoutCredentials.status).toBe("ready");
+      expect(snapshots.withoutCredentials.installed).toBe(true);
+      expect(snapshots.withoutCredentials.auth.status).toBe("unknown");
+      expect(snapshots.withCredentials.auth.status).toBe("authenticated");
+      expect(snapshots.withoutCredentials.models.map((model) => model.slug)).toEqual([
+        "claude-sonnet-5-high",
+      ]);
     }),
   );
 });
