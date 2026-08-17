@@ -513,6 +513,94 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("does not treat an invisible tool placeholder as active work", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang after a generic placeholder" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      const placeholderFollowup = Array.from(
+        yield* Stream.runCollect(Stream.take(runtime.getEvents(), 1)),
+      );
+      expect(placeholderFollowup[0]?._tag).toBe("AssistantItemStarted");
+      yield* TestClock.adjust("61 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 60s");
+        expect(error.detail).not.toContain("tool call");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_ORPHAN_GENERIC_TOOL_PLACEHOLDER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("uses the shorter idle timeout for visible active work", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang during visible work" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      const activeTool = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 1)));
+      expect(activeTool[0]?._tag).toBe("ToolCallUpdated");
+      yield* TestClock.adjust("11 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 10s");
+        expect(error.detail).toContain("1 tool call remained active");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("segments assistant text around ACP tool calls", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;

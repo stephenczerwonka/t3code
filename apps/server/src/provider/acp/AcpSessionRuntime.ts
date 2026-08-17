@@ -417,7 +417,10 @@ export const make = (
           yield* Ref.set(lastAgentActivityAtMillisRef, discounted.shiftedActivityAtMillis);
           continue;
         }
-        const activeToolCallCount = (yield* Ref.get(toolCallsRef)).size;
+        let activeToolCallCount = 0;
+        for (const toolCall of (yield* Ref.get(toolCallsRef)).values()) {
+          if (toolCall.detail !== undefined) activeToolCallCount += 1;
+        }
         const idleTimeoutMillis = Duration.toMillis(
           selectPromptIdleTimeout({
             promptIdleTimeout,

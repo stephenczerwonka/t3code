@@ -19,6 +19,9 @@ const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
+const emitOrphanGenericToolPlaceholder =
+  process.env.T3_ACP_EMIT_ORPHAN_GENERIC_TOOL_PLACEHOLDER === "1";
+const emitActiveToolThenHang = process.env.T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitCurrentElicitation = process.env.T3_ACP_EMIT_CURRENT_ELICITATION === "1";
 const expectedElicitationAction = process.env.T3_ACP_EXPECT_ELICITATION_ACTION;
@@ -550,6 +553,45 @@ const program = Effect.gen(function* () {
             agentResult: null,
           });
         }
+        return yield* Effect.never;
+      }
+
+      if (emitOrphanGenericToolPlaceholder) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "tool-call-orphan-generic-1",
+            title: "Tool call",
+            kind: "other",
+            status: "pending",
+            rawInput: {},
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "waiting" },
+          },
+        });
+        return yield* Effect.never;
+      }
+
+      if (emitActiveToolThenHang) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "tool-call-active-1",
+            title: "Terminal",
+            kind: "execute",
+            status: "in_progress",
+            rawInput: {
+              command: ["node", "long-running-task.js"],
+            },
+          },
+        });
         return yield* Effect.never;
       }
 
