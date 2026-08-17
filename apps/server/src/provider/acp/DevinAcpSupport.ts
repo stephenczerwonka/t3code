@@ -30,6 +30,13 @@ const DEVIN_PERMISSION_MODE_ENV = "DEVIN_PERMISSION_MODE";
  * hour instead — still finite, so a genuinely wedged turn surfaces.
  */
 const DEVIN_PROMPT_IDLE_TIMEOUT = Duration.minutes(60);
+/**
+ * The same remote-execution reality applies mid-tool: Devin's cloud session
+ * can run a visible tool for far longer than a local CLI without emitting
+ * updates, so the shared 10-minute tool-call idle default kills healthy
+ * long-running work. Bound tool silence at the same hour.
+ */
+const DEVIN_TOOL_CALL_IDLE_TIMEOUT = Duration.minutes(60);
 const DEVIN_PROCESS_FORCE_KILL_AFTER = Duration.seconds(2);
 
 export const DEVIN_ACP_CLIENT_CAPABILITIES = {
@@ -214,6 +221,13 @@ export function resolveDevinPromptIdleTimeout(
   return configured ?? DEVIN_PROMPT_IDLE_TIMEOUT;
 }
 
+/** An explicit caller override always wins over the Devin default. */
+export function resolveDevinToolCallIdleTimeout(
+  configured: Duration.Input | undefined,
+): Duration.Input {
+  return configured ?? DEVIN_TOOL_CALL_IDLE_TIMEOUT;
+}
+
 export const makeDevinAcpRuntime = (
   input: DevinAcpRuntimeInput,
 ): Effect.Effect<
@@ -233,6 +247,7 @@ export const makeDevinAcpRuntime = (
         clientCapabilities: DEVIN_ACP_CLIENT_CAPABILITIES,
         processForceKillAfter: DEVIN_PROCESS_FORCE_KILL_AFTER,
         promptIdleTimeout: resolveDevinPromptIdleTimeout(input.promptIdleTimeout),
+        toolCallIdleTimeout: resolveDevinToolCallIdleTimeout(input.toolCallIdleTimeout),
         spawn: buildDevinAcpSpawnInput(
           input.devinSettings,
           input.cwd,

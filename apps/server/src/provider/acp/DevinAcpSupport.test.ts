@@ -14,6 +14,7 @@ import {
   resolveDevinAcpBaseModelId,
   resolveDevinAcpInteractionMode,
   resolveDevinPermissionMode,
+  resolveDevinToolCallIdleTimeout,
   resolveDevinPromptIdleTimeout,
 } from "./DevinAcpSupport.ts";
 
@@ -33,6 +34,13 @@ describe("resolveDevinPromptIdleTimeout", () => {
   it("defaults to one hour and honors an explicit override", () => {
     expect(resolveDevinPromptIdleTimeout(undefined)).toEqual(Duration.minutes(60));
     expect(resolveDevinPromptIdleTimeout("30 seconds")).toBe("30 seconds");
+  });
+});
+
+describe("resolveDevinToolCallIdleTimeout", () => {
+  it("defaults to one hour and honors an explicit override", () => {
+    expect(resolveDevinToolCallIdleTimeout(undefined)).toEqual(Duration.minutes(60));
+    expect(resolveDevinToolCallIdleTimeout("30 seconds")).toBe("30 seconds");
   });
 });
 
