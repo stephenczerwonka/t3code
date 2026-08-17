@@ -100,6 +100,18 @@ export function resolveDevinPermissionMode(runtimeMode: RuntimeMode): string {
 
 const DEVIN_PLAN_MODE_ALIASES = ["plan", "architect"];
 const DEVIN_DEFAULT_MODE_ALIASES = ["normal", "code", "agent", "default", "chat", "implement"];
+/**
+ * Devin's ACP `mode` selector conflates interaction and permission level in
+ * one value. The `DEVIN_PERMISSION_MODE` env var is silently ignored by the
+ * CLI, so the negotiated config option is the only way to lift a session out
+ * of its `accept-edits` default.
+ */
+const DEVIN_RUNTIME_MODE_ALIASES: Record<RuntimeMode, ReadonlyArray<string>> = {
+  "approval-required": [],
+  "auto-accept-edits": ["accept edits"],
+  auto: ["smart"],
+  "full-access": ["bypass", "dangerous", "yolo"],
+};
 
 function normalizeModeValue(value: string): string {
   return value
@@ -126,18 +138,28 @@ function findModeValue(
 export function resolveDevinAcpInteractionMode(input: {
   readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
   readonly interactionMode: ProviderInteractionMode | undefined;
+  readonly runtimeMode?: RuntimeMode;
 }):
   | { readonly configId: string; readonly currentValue: string; readonly value: string }
   | undefined {
-  if (input.interactionMode === undefined) return undefined;
+  if (input.interactionMode === undefined && input.runtimeMode === undefined) return undefined;
   const configOption = input.configOptions.find(
     (option) => option.type === "select" && (option.id === "mode" || option.category === "mode"),
   );
   if (!configOption || configOption.type !== "select") return undefined;
-  const value = findModeValue(
-    collectSessionConfigOptionValues(configOption),
-    input.interactionMode === "plan" ? DEVIN_PLAN_MODE_ALIASES : DEVIN_DEFAULT_MODE_ALIASES,
-  );
+  const values = collectSessionConfigOptionValues(configOption);
+  // Plan always wins; otherwise the permission level picks the mode, falling
+  // back to a generic "code" style mode for agents without permission modes.
+  const value =
+    input.interactionMode === "plan"
+      ? findModeValue(values, DEVIN_PLAN_MODE_ALIASES)
+      : (findModeValue(
+          values,
+          input.runtimeMode ? DEVIN_RUNTIME_MODE_ALIASES[input.runtimeMode] : [],
+        ) ??
+        (input.interactionMode === undefined
+          ? undefined
+          : findModeValue(values, DEVIN_DEFAULT_MODE_ALIASES)));
   return value === undefined
     ? undefined
     : { configId: configOption.id, currentValue: configOption.currentValue, value };
@@ -151,11 +173,13 @@ export const applyDevinAcpInteractionMode = Effect.fn("applyDevinAcpInteractionM
     "getConfigOptions" | "setConfigOption"
   >;
   readonly interactionMode: ProviderInteractionMode | undefined;
+  readonly runtimeMode?: RuntimeMode;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }) {
   const resolved = resolveDevinAcpInteractionMode({
     configOptions: yield* input.runtime.getConfigOptions,
     interactionMode: input.interactionMode,
+    ...(input.runtimeMode ? { runtimeMode: input.runtimeMode } : {}),
   });
   if (!resolved || resolved.currentValue === resolved.value) return false;
   yield* input.runtime

@@ -1408,6 +1408,7 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 yield* applyDevinAcpInteractionMode({
                   runtime: prepared.acp,
                   interactionMode: prepared.interactionMode,
+                  runtimeMode: liveCtx.runtimeMode,
                   mapError: (cause) =>
                     mapAcpToAdapterError(
                       PROVIDER,

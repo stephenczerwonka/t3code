@@ -147,6 +147,68 @@ describe("Devin ACP interaction mode", () => {
     ).toBeUndefined();
   });
 
+  it("resolves the permission level from the runtime mode over the default alias", () => {
+    // Real Devin vocabulary: the DEVIN_PERMISSION_MODE env var is ignored, so
+    // the negotiated mode option is the only path to bypass.
+    const devinModes = modeConfig("accept-edits", [
+      "accept-edits",
+      "smart",
+      "ask",
+      "plan",
+      "bypass",
+    ]);
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: devinModes,
+        interactionMode: "default",
+        runtimeMode: "full-access",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "accept-edits", value: "bypass" });
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: devinModes,
+        interactionMode: "default",
+        runtimeMode: "auto",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "accept-edits", value: "smart" });
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: devinModes,
+        interactionMode: "default",
+        runtimeMode: "auto-accept-edits",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "accept-edits", value: "accept-edits" });
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: devinModes,
+        interactionMode: "default",
+        runtimeMode: "approval-required",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps plan precedence over the runtime mode", () => {
+    const devinModes = modeConfig("accept-edits", ["accept-edits", "smart", "plan", "bypass"]);
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions: devinModes,
+        interactionMode: "plan",
+        runtimeMode: "full-access",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "accept-edits", value: "plan" });
+  });
+
+  it("falls back to default aliases when the agent has no permission modes", () => {
+    const configOptions = modeConfig("ask", ["ask", "architect", "code"]);
+    expect(
+      resolveDevinAcpInteractionMode({
+        configOptions,
+        interactionMode: "default",
+        runtimeMode: "full-access",
+      }),
+    ).toEqual({ configId: "mode", currentValue: "ask", value: "code" });
+  });
+
   it.effect("writes only actual negotiated mode changes", () =>
     Effect.gen(function* () {
       let currentValue = "normal";
