@@ -15,6 +15,7 @@ import {
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -159,6 +160,25 @@ interface DevinSessionContext {
   lastPromptSettledAtMillis: number;
   stopped: boolean;
 }
+
+const drainDevinAcpEvents = Effect.fn("drainDevinAcpEvents")(function* (input: {
+  readonly threadId: ThreadId;
+  readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly notificationFiber: Fiber.Fiber<void, never>;
+}) {
+  return yield* Effect.raceFirst(
+    input.acp.drainEvents,
+    Effect.gen(function* () {
+      const exit = yield* Fiber.await(input.notificationFiber);
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "session/update",
+        detail: "Devin notification consumer exited before queued ACP events were drained.",
+        ...(Exit.isFailure(exit) ? { cause: Cause.squash(exit.cause) } : {}),
+      });
+    }),
+  );
+});
 
 function settlePendingApprovalsAsCancelled(
   pendingApprovals: ReadonlyMap<ApprovalRequestId, PendingApproval>,
@@ -1357,11 +1377,21 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
                 payload: displayModel ? { model: displayModel } : {},
               });
 
+              const notificationFiber = ctx.notificationFiber;
+              if (!notificationFiber) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/update",
+                  detail: "Devin notification consumer was not started.",
+                });
+              }
+
               return {
                 acp: ctx.acp,
                 acpSessionId: ctx.acpSessionId,
                 displayModel,
                 interactionMode: input.interactionMode,
+                notificationFiber,
                 promptConfigurationSemaphore: ctx.promptConfigurationSemaphore,
                 promptParts,
                 turnId,
@@ -1437,7 +1467,13 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               ),
               Effect.tapError((error) =>
                 Ref.set(promptFailureMessageRef, error.message).pipe(
-                  Effect.andThen(prepared.acp.drainEvents),
+                  Effect.andThen(
+                    drainDevinAcpEvents({
+                      threadId: input.threadId,
+                      acp: prepared.acp,
+                      notificationFiber: prepared.notificationFiber,
+                    }),
+                  ),
                 ),
               ),
             );
@@ -1469,7 +1505,11 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
               for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
                 yield* Effect.yieldNow;
               }
-              yield* prepared.acp.drainEvents;
+              yield* drainDevinAcpEvents({
+                threadId: input.threadId,
+                acp: prepared.acp,
+                notificationFiber: prepared.notificationFiber,
+              });
               if (ctx.interruptedTurnIds.has(prepared.turnId)) {
                 yield* Ref.set(promptSettled, true);
                 return {

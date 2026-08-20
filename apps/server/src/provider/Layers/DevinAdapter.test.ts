@@ -1691,4 +1691,31 @@ it.layer(devinAdapterTestLayer)("DevinAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  it.effect("fails turn settlement when the notification consumer exits", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("devin-notification-consumer-exit");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockDevinWrapper({ T3_ACP_EMIT_AVAILABLE_COMMANDS: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        onSlashCommandsChanged: () =>
+          Effect.die(new Error("notification consumer failed during command update")),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("devin"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const error = yield* Effect.flip(
+        adapter.sendTurn({ threadId, input: "show commands", attachments: [] }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.include(error.message, "notification consumer exited");
+      yield* adapter.stopSession(threadId);
+    }),
+  );
 });
