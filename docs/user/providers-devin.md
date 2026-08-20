@@ -20,7 +20,8 @@ API key: optional
 ```
 
 T3 uses the configured API key first, then `WINDSURF_API_KEY` from the server environment. If
-neither is set, Devin can start its browser login flow when a session begins.
+neither is set, Devin uses credentials saved by `devin auth login` or starts its browser login flow
+when a session begins.
 
 For a custom installation, set **Binary path** to the full path of the Devin executable.
 
@@ -87,6 +88,7 @@ If Devin is unavailable:
 
 1. Run `devin --version` on the T3 server machine.
 2. Check the provider's Binary path in Settings.
-3. Confirm the configured API key or `WINDSURF_API_KEY` is valid, or complete browser login.
+3. Run `devin auth status`, confirm the configured API key or `WINDSURF_API_KEY` is valid, or
+   complete browser login.
 4. Refresh provider status in Settings.
 5. Start a new thread after changing authentication or the CLI installation.

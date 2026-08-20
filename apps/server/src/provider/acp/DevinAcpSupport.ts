@@ -79,11 +79,10 @@ export function buildDevinAcpSpawnInput(
 }
 
 /**
- * Devin's ACP server intentionally ignores local CLI credentials — the host
- * must supply an API key via `authenticate` `_meta.api_key`. We source the
- * key from instance settings first, then the `WINDSURF_API_KEY` environment
- * variable. When neither is present the plain authenticate call starts
- * Devin's PKCE browser login flow.
+ * Devin ACP can use credentials stored by `devin auth login`, the
+ * `WINDSURF_API_KEY` environment variable, or runtime ACP authentication.
+ * A key configured on the provider takes precedence over the environment and
+ * is supplied through `authenticate` `_meta.api_key`.
  */
 export function hasDevinCredentials(
   devinSettings: Pick<DevinSettings, "apiKey"> | null | undefined,
@@ -195,7 +194,7 @@ export const applyDevinAcpInteractionMode = Effect.fn("applyDevinAcpInteractionM
   return true;
 });
 
-function resolveDevinAuthenticateMeta(
+export function resolveDevinAuthenticateMeta(
   devinSettings: DevinAcpRuntimeDevinSettings | null | undefined,
   environment: NodeJS.ProcessEnv | undefined,
 ): Readonly<Record<string, unknown>> | undefined {

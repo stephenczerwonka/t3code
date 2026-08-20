@@ -11,6 +11,7 @@ import {
   DEVIN_ACP_CLIENT_CAPABILITIES,
   hasDevinCredentials,
   resolveDevinAuthMethod,
+  resolveDevinAuthenticateMeta,
   resolveDevinAcpBaseModelId,
   resolveDevinAcpInteractionMode,
   resolveDevinPermissionMode,
@@ -96,6 +97,29 @@ describe("hasDevinCredentials", () => {
     expect(hasDevinCredentials({ apiKey: "" }, { WINDSURF_API_KEY: "key" })).toBe(true);
     expect(hasDevinCredentials({ apiKey: "  " }, { WINDSURF_API_KEY: "  " })).toBe(false);
     expect(hasDevinCredentials(null, undefined)).toBe(false);
+  });
+});
+
+describe("resolveDevinAuthenticateMeta", () => {
+  it("prefers the configured key, falls back to the environment, and omits empty keys", () => {
+    expect(
+      resolveDevinAuthenticateMeta(
+        { binaryPath: "devin", apiKey: "settings-key" },
+        { WINDSURF_API_KEY: "environment-key" },
+      ),
+    ).toEqual({ api_key: "settings-key" });
+    expect(
+      resolveDevinAuthenticateMeta(
+        { binaryPath: "devin", apiKey: "" },
+        { WINDSURF_API_KEY: "environment-key" },
+      ),
+    ).toEqual({ api_key: "environment-key" });
+    expect(
+      resolveDevinAuthenticateMeta(
+        { binaryPath: "devin", apiKey: "  " },
+        { WINDSURF_API_KEY: "  " },
+      ),
+    ).toBeUndefined();
   });
 });
 
