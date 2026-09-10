@@ -3,7 +3,11 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
-import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  canSnooze,
+  resolveSnoozePresets,
+  resolveThreadAutoSettleChangeRequestState,
+} from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 import {
@@ -398,7 +402,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const pinnedRow = props.pinned === true;
 
   const pr = useThreadPr(thread, props.projectCwd ?? props.project?.workspaceRoot ?? null);
-  const prState = pr?.state ?? null;
+  const prState = resolveThreadAutoSettleChangeRequestState({
+    threadCreatedAt: thread.createdAt,
+    changeRequest: pr,
+  });
   const threadKey = `${thread.environmentId}:${thread.id}`;
   useEffect(() => {
     onChangeRequestState?.(threadKey, prState);

@@ -1961,13 +1961,18 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand =
+    options.platform === "win"
+      ? yield* resolveSpawnCommand("corepack", ["pnpm", ...STAGE_INSTALL_ARGS])
+      : yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installLabel =
+    options.platform === "win" ? "corepack pnpm install --prod" : "vp install --prod";
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: stageAppDir,
       shell: installCommand.shell,
     }),
-    { label: "vp install --prod", verbose: options.verbose },
+    { label: installLabel, verbose: options.verbose },
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 

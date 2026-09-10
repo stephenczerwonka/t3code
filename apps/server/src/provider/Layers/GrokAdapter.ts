@@ -819,6 +819,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         turnId: notificationTurnId,
                         itemId: event.itemId,
                         lifecycle: "item.started",
+                        streamKind: event.streamKind,
                       }),
                     );
                     return;
@@ -831,6 +832,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         turnId: notificationTurnId,
                         itemId: event.itemId,
                         lifecycle: "item.completed",
+                        streamKind: event.streamKind,
                       }),
                     );
                     return;
@@ -864,6 +866,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         threadId: ctx.threadId,
                         turnId: notificationTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
+                        streamKind: event.streamKind,
                         text: event.text,
                         rawPayload: event.rawPayload,
                       }),

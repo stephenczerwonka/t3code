@@ -141,8 +141,11 @@ export const SpawnExecutableResolution = Context.Reference<SpawnExecutableResolv
   },
 );
 
+export type WindowsEnvironmentTarget = "Process" | "User" | "Machine";
+
 export interface WindowsEnvironmentProbeOptions {
   readonly loadProfile?: boolean;
+  readonly target?: WindowsEnvironmentTarget;
 }
 
 function trimNonEmpty(value: string | null | undefined): string | undefined {
@@ -261,7 +264,10 @@ function buildEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
     .join("; ");
 }
 
-function buildWindowsEnvironmentCaptureCommand(names: ReadonlyArray<string>): string {
+function buildWindowsEnvironmentCaptureCommand(
+  names: ReadonlyArray<string>,
+  target: WindowsEnvironmentTarget,
+): string {
   return [
     "$ErrorActionPreference = 'Stop'",
     ...names.flatMap((name) => {
@@ -271,7 +277,7 @@ function buildWindowsEnvironmentCaptureCommand(names: ReadonlyArray<string>): st
 
       return [
         `Write-Output '${envCaptureStart(name)}'`,
-        `$value = [Environment]::GetEnvironmentVariable('${name}')`,
+        `$value = [Environment]::GetEnvironmentVariable('${name}', [EnvironmentVariableTarget]::${target})`,
         "if ($null -ne $value -and $value.Length -gt 0) { Write-Output $value }",
         `Write-Output '${envCaptureEnd(name)}'`,
       ];
@@ -373,7 +379,7 @@ export function readEnvironmentFromWindowsShell(
     typeof optionsOrExecFile === "function"
       ? optionsOrExecFile
       : (maybeExecFile ?? (NodeChildProcess.execFileSync as ExecFileSyncLike));
-  const command = buildWindowsEnvironmentCaptureCommand(names);
+  const command = buildWindowsEnvironmentCaptureCommand(names, options.target ?? "Process");
   const args = [
     "-NoLogo",
     ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
@@ -540,7 +546,14 @@ function cacheCommandResolution(
   });
 }
 
-const isExecutableFile = Effect.fn("shell.isExecutableFile")(function* (
+/**
+ * Deliberately untraced. This runs once per PATH entry per command candidate —
+ * on Windows that is PATHEXT (~10, cased both ways) times every PATH entry, so
+ * a single resolution can emit hundreds of spans. Tracing at this granularity
+ * buried real spans and rotated the trace log every ~90 seconds. The enclosing
+ * `shell.resolveCommandPath` span is the useful unit.
+ */
+const isExecutableFile = Effect.fnUntraced(function* (
   filePath: string,
   platform: NodeJS.Platform,
   windowsPathExtensions: ReadonlyArray<string>,
@@ -719,12 +732,18 @@ export const resolveWindowsEnvironment = Effect.fn("shell.resolveWindowsEnvironm
   const readEnvironment = yield* WindowsShellEnvironment;
   const commandAvailable = yield* CommandAvailability;
   const inheritedPath = readEnvPath(env);
-  const shellPath = readWindowsEnvironmentSafely(readEnvironment, ["PATH"], {
+  const userPath = readWindowsEnvironmentSafely(readEnvironment, ["PATH"], {
     loadProfile: false,
+    target: "User",
   }).PATH;
-  const mergedPath = mergePathValues(shellPath, inheritedPath, "win32");
+  const machinePath = readWindowsEnvironmentSafely(readEnvironment, ["PATH"], {
+    loadProfile: false,
+    target: "Machine",
+  }).PATH;
+  const registeredPath = mergePathValues(machinePath, userPath, "win32");
   const knownCliPath = resolveKnownWindowsCliDirs(env).join(WINDOWS_PATH_DELIMITER);
-  const baselinePath = mergePathValues(knownCliPath, mergedPath, "win32");
+  const fallbackPath = mergePathValues(knownCliPath, inheritedPath, "win32");
+  const baselinePath = mergePathValues(registeredPath, fallbackPath, "win32");
   const baselinePatch: Partial<NodeJS.ProcessEnv> = baselinePath ? { PATH: baselinePath } : {};
   const baselineEnv = mergeWindowsEnv(env, baselinePatch);
 
@@ -735,7 +754,7 @@ export const resolveWindowsEnvironment = Effect.fn("shell.resolveWindowsEnvironm
   const profiledEnvironment = readWindowsEnvironmentSafely(
     readEnvironment,
     ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"],
-    { loadProfile: true },
+    { loadProfile: true, target: "Process" },
   );
   const profiledPath = mergePathValues(profiledEnvironment.PATH, baselinePath, "win32");
   const profiledPatch: Partial<NodeJS.ProcessEnv> = {

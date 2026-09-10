@@ -1049,6 +1049,12 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /**
+   * Reports whether any turn is running so the desktop shell can hold a
+   * powerSaveBlocker for the duration — locking or closing the lid must not
+   * suspend the machine out from under in-flight agent work.
+   */
+  setTurnActivity: (turnRunning: boolean) => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;

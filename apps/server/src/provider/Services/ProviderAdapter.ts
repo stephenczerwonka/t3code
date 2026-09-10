@@ -11,6 +11,7 @@ import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
+  ProviderUserInputAction,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -24,12 +25,15 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderConversationRollbackMode = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  readonly conversationRollback?: ProviderConversationRollbackMode;
+  readonly userInputActions?: ReadonlyArray<ProviderUserInputAction>;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -84,6 +88,7 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
+    action?: ProviderUserInputAction,
   ) => Effect.Effect<void, TError>;
 
   /**

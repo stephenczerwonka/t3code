@@ -3,6 +3,22 @@ import type { OrchestrationThreadShell } from "@t3tools/contracts";
 
 export type ChangeRequestStateLike = "open" | "closed" | "merged";
 
+export function resolveThreadAutoSettleChangeRequestState(input: {
+  readonly threadCreatedAt: string;
+  readonly changeRequest: {
+    readonly state: ChangeRequestStateLike;
+    readonly updatedAt?: string | undefined;
+  } | null;
+}): ChangeRequestStateLike | null {
+  const changeRequest = input.changeRequest;
+  if (changeRequest === null) return null;
+  if (changeRequest.state === "open") return "open";
+  const threadCreatedAt = Date.parse(input.threadCreatedAt);
+  const changeRequestUpdatedAt = Date.parse(changeRequest.updatedAt ?? "");
+  if (Number.isNaN(threadCreatedAt) || Number.isNaN(changeRequestUpdatedAt)) return null;
+  return changeRequestUpdatedAt >= threadCreatedAt ? changeRequest.state : null;
+}
+
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
 export function threadLastActivityAt(shell: OrchestrationThreadShell): string | null {

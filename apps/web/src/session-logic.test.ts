@@ -227,6 +227,9 @@ describe("derivePendingUserInputs", () => {
         tone: "info",
         payload: {
           requestId: "req-user-input-1",
+          message: "Review the requested configuration.",
+          responseActions: ["decline", "cancel"],
+          requiresReview: true,
           questions: [
             {
               id: "sandbox_mode",
@@ -234,11 +237,13 @@ describe("derivePendingUserInputs", () => {
               question: "Which mode should be used?",
               options: [
                 {
-                  label: "workspace-write",
+                  label: "Workspace",
+                  value: "workspace-write",
                   description: "Allow workspace writes only",
                 },
               ],
               multiSelect: true,
+              required: false,
             },
           ],
         },
@@ -286,6 +291,7 @@ describe("derivePendingUserInputs", () => {
       {
         requestId: "req-user-input-1",
         createdAt: "2026-02-23T00:00:01.000Z",
+        message: "Review the requested configuration.",
         questions: [
           {
             id: "sandbox_mode",
@@ -293,13 +299,47 @@ describe("derivePendingUserInputs", () => {
             question: "Which mode should be used?",
             options: [
               {
-                label: "workspace-write",
+                label: "Workspace",
+                value: "workspace-write",
                 description: "Allow workspace writes only",
               },
             ],
             multiSelect: true,
+            required: false,
           },
         ],
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
+      },
+    ]);
+  });
+
+  it("keeps empty review-required forms pending", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-empty",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-empty",
+          message: "Continue with the migration?",
+          responseActions: ["decline", "cancel"],
+          requiresReview: true,
+          questions: [],
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([
+      {
+        requestId: "req-user-input-empty",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        message: "Continue with the migration?",
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
+        questions: [],
       },
     ]);
   });

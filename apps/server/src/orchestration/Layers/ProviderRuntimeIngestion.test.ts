@@ -3023,6 +3023,36 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("keeps zero-token context updates after compaction", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "thread.token-usage.updated",
+      eventId: asEventId("evt-thread-token-usage-zero"),
+      provider: ProviderDriverKind.make("devin"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        usage: {
+          usedTokens: 0,
+          totalProcessedTokens: 420,
+          maxTokens: 200_000,
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+      ),
+    );
+    expect(
+      thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+      )?.payload,
+    ).toMatchObject({ usedTokens: 0, totalProcessedTokens: 420, maxTokens: 200_000 });
+  });
+
   it("projects Codex camelCase token usage payloads into normalized thread activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -3459,6 +3489,9 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-user-input"),
       requestId: ApprovalRequestId.make("req-user-input-1"),
       payload: {
+        message: "Review the sandbox configuration.",
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
         questions: [
           {
             id: "sandbox_mode",
@@ -3466,10 +3499,12 @@ describe("ProviderRuntimeIngestion", () => {
             question: "Which mode should be used?",
             options: [
               {
-                label: "workspace-write",
+                label: "Workspace",
+                value: "workspace-write",
                 description: "Allow workspace writes only",
               },
             ],
+            required: true,
           },
         ],
       },
@@ -3484,6 +3519,7 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-user-input"),
       requestId: ApprovalRequestId.make("req-user-input-1"),
       payload: {
+        action: "accept",
         answers: {
           sandbox_mode: "workspace-write",
         },
@@ -3505,6 +3541,18 @@ describe("ProviderRuntimeIngestion", () => {
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-requested",
     );
     expect(requested?.kind).toBe("user-input.requested");
+    expect(requested?.payload).toMatchObject({
+      message: "Review the sandbox configuration.",
+      responseActions: ["decline", "cancel"],
+      requiresReview: true,
+      questions: [
+        {
+          id: "sandbox_mode",
+          required: true,
+          options: [{ label: "Workspace", value: "workspace-write" }],
+        },
+      ],
+    });
 
     const resolved = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-resolved",
@@ -3514,6 +3562,7 @@ describe("ProviderRuntimeIngestion", () => {
         ? (resolved.payload as Record<string, unknown>)
         : undefined;
     expect(resolved?.kind).toBe("user-input.resolved");
+    expect(resolvedPayload?.action).toBe("accept");
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });

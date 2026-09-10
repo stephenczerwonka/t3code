@@ -15,6 +15,7 @@ export interface PendingUserInputProgress {
   usingCustomAnswer: boolean;
   answeredQuestionCount: number;
   isLastQuestion: boolean;
+  isReviewing: boolean;
   isComplete: boolean;
   canAdvance: boolean;
 }
@@ -49,16 +50,15 @@ export function resolvePendingUserInputAnswer(
   question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | string[] | null {
-  const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer) {
-    return customAnswer;
-  }
-
   const selectedOptionLabels = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
   if (question.multiSelect) {
     return selectedOptionLabels.length > 0 ? selectedOptionLabels : null;
   }
 
+  const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
+  if (customAnswer) {
+    return customAnswer;
+  }
   return selectedOptionLabels[0] ?? null;
 }
 
@@ -111,7 +111,10 @@ export function buildPendingUserInputAnswers(
   for (const question of questions) {
     const answer = resolvePendingUserInputAnswer(question, draftAnswers[question.id]);
     if (!answer) {
-      return null;
+      if (question.required !== false) {
+        return null;
+      }
+      continue;
     }
     answers[question.id] = answer;
   }
@@ -133,7 +136,9 @@ export function findFirstUnansweredPendingUserInputQuestionIndex(
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
 ): number {
   const unansweredIndex = questions.findIndex(
-    (question) => !resolvePendingUserInputAnswer(question, draftAnswers[question.id]),
+    (question) =>
+      question.required !== false &&
+      !resolvePendingUserInputAnswer(question, draftAnswers[question.id]),
   );
 
   return unansweredIndex === -1 ? Math.max(questions.length - 1, 0) : unansweredIndex;
@@ -143,18 +148,22 @@ export function derivePendingUserInputProgress(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
   questionIndex: number,
+  requiresReview = false,
 ): PendingUserInputProgress {
-  const normalizedQuestionIndex =
-    questions.length === 0 ? 0 : Math.max(0, Math.min(questionIndex, questions.length - 1));
-  const activeQuestion = questions[normalizedQuestionIndex] ?? null;
+  const reviewIndex = questions.length;
+  const maxQuestionIndex = requiresReview ? reviewIndex : Math.max(questions.length - 1, 0);
+  const normalizedQuestionIndex = Math.max(0, Math.min(questionIndex, maxQuestionIndex));
+  const isReviewing = requiresReview && normalizedQuestionIndex === reviewIndex;
+  const activeQuestion = isReviewing ? null : (questions[normalizedQuestionIndex] ?? null);
   const activeDraft = activeQuestion ? draftAnswers[activeQuestion.id] : undefined;
   const resolvedAnswer = activeQuestion
     ? resolvePendingUserInputAnswer(activeQuestion, activeDraft)
     : null;
   const customAnswer = activeDraft?.customAnswer ?? "";
   const answeredQuestionCount = countAnsweredPendingUserInputQuestions(questions, draftAnswers);
+  const isComplete = buildPendingUserInputAnswers(questions, draftAnswers) !== null;
   const isLastQuestion =
-    questions.length === 0 ? true : normalizedQuestionIndex >= questions.length - 1;
+    isReviewing || questions.length === 0 || normalizedQuestionIndex >= questions.length - 1;
 
   return {
     questionIndex: normalizedQuestionIndex,
@@ -166,7 +175,10 @@ export function derivePendingUserInputProgress(
     usingCustomAnswer: customAnswer.trim().length > 0,
     answeredQuestionCount,
     isLastQuestion,
-    isComplete: buildPendingUserInputAnswers(questions, draftAnswers) !== null,
-    canAdvance: Boolean(resolvedAnswer),
+    isReviewing,
+    isComplete,
+    canAdvance: isReviewing
+      ? isComplete
+      : Boolean(resolvedAnswer) || activeQuestion?.required === false,
   };
 }

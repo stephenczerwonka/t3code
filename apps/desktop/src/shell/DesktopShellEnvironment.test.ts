@@ -212,13 +212,21 @@ describe("DesktopShellEnvironment", () => {
         handler: (command) => {
           if (command._tag !== "StandardCommand") return "";
           const loadProfile = !command.args.includes("-NoProfile");
-          return loadProfile
-            ? envOutput({
-                PATH: "C:\\Profile\\Node;C:\\Windows\\System32",
-                FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
-                FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
-              })
-            : envOutput({ PATH: "C:\\Custom\\Bin;C:\\Windows\\System32" });
+          if (loadProfile) {
+            return envOutput({
+              PATH: "C:\\Profile\\Node;C:\\Windows\\System32",
+              FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
+              FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
+            });
+          }
+          const captureCommand = command.args.at(-1) ?? "";
+          if (captureCommand.includes("EnvironmentVariableTarget]::Machine")) {
+            return envOutput({ PATH: "C:\\Windows\\System32" });
+          }
+          if (captureCommand.includes("EnvironmentVariableTarget]::User")) {
+            return envOutput({ PATH: "C:\\Registered\\Custom\\Bin" });
+          }
+          return envOutput({ PATH: "C:\\Process\\Bin;C:\\Windows\\System32" });
         },
       });
 
@@ -227,6 +235,7 @@ describe("DesktopShellEnvironment", () => {
         [
           "C:\\Profile\\Node",
           "C:\\Windows\\System32",
+          "C:\\Registered\\Custom\\Bin",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
@@ -234,7 +243,6 @@ describe("DesktopShellEnvironment", () => {
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Custom\\Bin",
         ].join(";"),
       );
       assert.equal(env.FNM_DIR, "C:\\Users\\testuser\\AppData\\Roaming\\fnm");

@@ -8,6 +8,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  type ProviderUserInputAction,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -49,6 +50,12 @@ export const PROVIDER_OPTIONS: Array<{
   {
     value: ProviderDriverKind.make("grok"),
     label: "Grok",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: ProviderDriverKind.make("devin"),
+    label: "Devin",
     available: true,
     pickerSidebarBadge: "new",
   },
@@ -115,7 +122,10 @@ export interface PendingApproval {
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
   createdAt: string;
+  message?: string;
   questions: ReadonlyArray<UserInputQuestion>;
+  responseActions?: ReadonlyArray<ProviderUserInputAction>;
+  requiresReview?: boolean;
 }
 
 export interface ActivePlanState {
@@ -471,22 +481,31 @@ function parseUserInputQuestions(
           return {
             label: optionRecord.label,
             description: optionRecord.description,
+            ...(typeof optionRecord.value === "string" ? { value: optionRecord.value } : {}),
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
-        return null;
-      }
       return {
         id: question.id,
         header: question.header,
         question: question.question,
         options,
         multiSelect: question.multiSelect === true,
+        ...(typeof question.required === "boolean" ? { required: question.required } : {}),
       };
     })
     .filter((question): question is UserInputQuestion => question !== null);
-  return parsed.length > 0 ? parsed : null;
+  return parsed;
+}
+
+function parseProviderUserInputActions(
+  value: unknown,
+): ReadonlyArray<ProviderUserInputAction> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(
+    (action): action is ProviderUserInputAction =>
+      action === "accept" || action === "decline" || action === "cancel",
+  );
 }
 
 export function derivePendingUserInputs(
@@ -511,10 +530,16 @@ export function derivePendingUserInputs(
       if (!questions) {
         continue;
       }
+      const responseActions = parseProviderUserInputActions(payload?.responseActions);
       openByRequestId.set(requestId, {
         requestId,
         createdAt: activity.createdAt,
+        ...(typeof payload?.message === "string" ? { message: payload.message } : {}),
         questions,
+        ...(responseActions !== undefined ? { responseActions } : {}),
+        ...(typeof payload?.requiresReview === "boolean"
+          ? { requiresReview: payload.requiresReview }
+          : {}),
       });
       continue;
     }

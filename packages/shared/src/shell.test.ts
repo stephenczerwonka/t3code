@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -236,6 +238,7 @@ describe("readEnvironmentFromWindowsShell", () => {
       expect.arrayContaining(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]),
       { encoding: "utf8", timeout: 5000 },
     );
+    expect(execFile.mock.calls[0]?.[1].at(-1)).toContain("EnvironmentVariableTarget]::Process");
   });
 
   it("strips CRLF delimiters from captured PowerShell values", () => {
@@ -273,6 +276,21 @@ describe("readEnvironmentFromWindowsShell", () => {
       { encoding: "utf8", timeout: 5000 },
     );
     expect(execFile.mock.calls[0]?.[1]).not.toContain("-NoProfile");
+  });
+
+  it("reads the requested registered environment scope", () => {
+    const execFile = vi.fn<
+      (
+        file: string,
+        args: ReadonlyArray<string>,
+        options: { encoding: "utf8"; timeout: number },
+      ) => string
+    >(() => "__T3CODE_ENV_PATH_START__\nC:\\Custom\\Bin\n__T3CODE_ENV_PATH_END__\n");
+
+    expect(
+      readEnvironmentFromWindowsShell(["PATH"], { loadProfile: false, target: "User" }, execFile),
+    ).toEqual({ PATH: "C:\\Custom\\Bin" });
+    expect(execFile.mock.calls[0]?.[1].at(-1)).toContain("EnvironmentVariableTarget]::User");
   });
 
   it("falls back to Windows PowerShell when pwsh.exe is unavailable", () => {
@@ -453,10 +471,15 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
   it.effect("returns the baseline no-profile PATH patch when node is already available", () =>
     Effect.gen(function* () {
       const readEnvironment = vi.fn(
-        (_names: ReadonlyArray<string>, options?: { loadProfile?: boolean }) =>
-          options?.loadProfile
-            ? { PATH: "C:\\Profile\\Bin" }
-            : { PATH: "C:\\Shell\\Bin;C:\\Windows\\System32" },
+        (
+          _names: ReadonlyArray<string>,
+          options?: { loadProfile?: boolean; target?: "Process" | "User" | "Machine" },
+        ) => {
+          if (options?.loadProfile) return { PATH: "C:\\Profile\\Bin" };
+          if (options?.target === "Machine") return { PATH: "C:\\Windows\\System32" };
+          if (options?.target === "User") return { PATH: "C:\\Registered\\Custom\\Bin" };
+          return { PATH: "C:\\Shell\\Bin;C:\\Windows\\System32" };
+        },
       );
       const commandAvailable = vi.fn(() => Effect.succeed(true));
 
@@ -473,6 +496,8 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
         ),
       ).toEqual({
         PATH: [
+          "C:\\Windows\\System32",
+          "C:\\Registered\\Custom\\Bin",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
@@ -480,12 +505,17 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Shell\\Bin",
-          "C:\\Windows\\System32",
         ].join(";"),
       });
-      expect(readEnvironment).toHaveBeenCalledTimes(1);
-      expect(readEnvironment).toHaveBeenCalledWith(["PATH"], { loadProfile: false });
+      expect(readEnvironment).toHaveBeenCalledTimes(2);
+      expect(readEnvironment).toHaveBeenNthCalledWith(1, ["PATH"], {
+        loadProfile: false,
+        target: "User",
+      });
+      expect(readEnvironment).toHaveBeenNthCalledWith(2, ["PATH"], {
+        loadProfile: false,
+        target: "Machine",
+      });
       expect(commandAvailable).toHaveBeenCalledWith(
         "node",
         expect.objectContaining({ env: expect.any(Object) }),
@@ -496,14 +526,21 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
   it.effect("loads the PowerShell profile when baseline env cannot resolve node", () =>
     Effect.gen(function* () {
       const readEnvironment = vi.fn(
-        (_names: ReadonlyArray<string>, options?: { loadProfile?: boolean }) =>
-          options?.loadProfile
-            ? {
-                PATH: "C:\\Profile\\Node;C:\\Windows\\System32",
-                FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
-                FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
-              }
-            : { PATH: "C:\\Shell\\Bin;C:\\Windows\\System32" },
+        (
+          _names: ReadonlyArray<string>,
+          options?: { loadProfile?: boolean; target?: "Process" | "User" | "Machine" },
+        ) => {
+          if (options?.loadProfile) {
+            return {
+              PATH: "C:\\Profile\\Node;C:\\Windows\\System32",
+              FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
+              FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
+            };
+          }
+          if (options?.target === "Machine") return { PATH: "C:\\Windows\\System32" };
+          if (options?.target === "User") return { PATH: "C:\\Registered\\Custom\\Bin" };
+          return { PATH: "C:\\Shell\\Bin;C:\\Windows\\System32" };
+        },
       );
       const commandAvailable = vi.fn(() => Effect.succeed(false));
 
@@ -522,6 +559,7 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
         PATH: [
           "C:\\Profile\\Node",
           "C:\\Windows\\System32",
+          "C:\\Registered\\Custom\\Bin",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
@@ -529,17 +567,24 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Shell\\Bin",
         ].join(";"),
         FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
         FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
       });
-      expect(readEnvironment).toHaveBeenNthCalledWith(1, ["PATH"], { loadProfile: false });
+      expect(readEnvironment).toHaveBeenNthCalledWith(1, ["PATH"], {
+        loadProfile: false,
+        target: "User",
+      });
+      expect(readEnvironment).toHaveBeenNthCalledWith(2, ["PATH"], {
+        loadProfile: false,
+        target: "Machine",
+      });
       expect(readEnvironment).toHaveBeenNthCalledWith(
-        2,
+        3,
         ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"],
         {
           loadProfile: true,
+          target: "Process",
         },
       );
       expect(commandAvailable).toHaveBeenCalledTimes(1);
@@ -549,7 +594,10 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
   it.effect("keeps the baseline env when profiled probe still does not resolve node", () =>
     Effect.gen(function* () {
       const readEnvironment = vi.fn(
-        (_names: ReadonlyArray<string>, options?: { loadProfile?: boolean }) =>
+        (
+          _names: ReadonlyArray<string>,
+          options?: { loadProfile?: boolean; target?: "Process" | "User" | "Machine" },
+        ) =>
           options?.loadProfile ? { FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm" } : {},
       );
       const commandAvailable = vi.fn(() => Effect.succeed(false));

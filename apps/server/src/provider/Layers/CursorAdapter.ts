@@ -800,6 +800,7 @@ export function makeCursorAdapter(
                         turnId: ctx.activeTurnId,
                         itemId: event.itemId,
                         lifecycle: "item.started",
+                        streamKind: event.streamKind,
                       }),
                     );
                     return;
@@ -812,6 +813,7 @@ export function makeCursorAdapter(
                         turnId: ctx.activeTurnId,
                         itemId: event.itemId,
                         lifecycle: "item.completed",
+                        streamKind: event.streamKind,
                       }),
                     );
                     return;
@@ -862,6 +864,7 @@ export function makeCursorAdapter(
                         threadId: ctx.threadId,
                         turnId: ctx.activeTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
+                        streamKind: event.streamKind,
                         text: event.text,
                         rawPayload: event.rawPayload,
                       }),

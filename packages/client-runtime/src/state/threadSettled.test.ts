@@ -11,6 +11,7 @@ import {
   canSettle,
   effectiveSettled,
   hasQueuedTurnStart,
+  resolveThreadAutoSettleChangeRequestState,
   threadLastActivityAt,
   type ChangeRequestStateLike,
 } from "./threadSettled.ts";
@@ -88,6 +89,52 @@ describe("threadLastActivityAt", () => {
 
     expect(threadLastActivityAt(withActivity)).toBe("2026-04-06T00:00:00.000Z");
     expect(threadLastActivityAt(shell)).toBeNull();
+  });
+});
+
+describe("resolveThreadAutoSettleChangeRequestState", () => {
+  const threadCreatedAt = "2026-04-10T00:00:00.000Z";
+
+  it.each(["merged", "closed"] as const)(
+    "ignores a %s change request completed before the thread was created",
+    (state) => {
+      expect(
+        resolveThreadAutoSettleChangeRequestState({
+          threadCreatedAt,
+          changeRequest: { state, updatedAt: "2026-04-09T23:59:59.999Z" },
+        }),
+      ).toBeNull();
+      expect(
+        resolveThreadAutoSettleChangeRequestState({
+          threadCreatedAt,
+          changeRequest: { state, updatedAt: threadCreatedAt },
+        }),
+      ).toBe(state);
+    },
+  );
+
+  it("preserves open change requests regardless of timestamp", () => {
+    expect(
+      resolveThreadAutoSettleChangeRequestState({
+        threadCreatedAt,
+        changeRequest: { state: "open", updatedAt: "2026-04-01T00:00:00.000Z" },
+      }),
+    ).toBe("open");
+  });
+
+  it("does not auto-settle terminal requests with missing or malformed timing", () => {
+    expect(
+      resolveThreadAutoSettleChangeRequestState({
+        threadCreatedAt,
+        changeRequest: { state: "merged" },
+      }),
+    ).toBeNull();
+    expect(
+      resolveThreadAutoSettleChangeRequestState({
+        threadCreatedAt: "invalid",
+        changeRequest: { state: "merged", updatedAt: NOW },
+      }),
+    ).toBeNull();
   });
 });
 

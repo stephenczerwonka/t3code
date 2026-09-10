@@ -24,6 +24,7 @@ import {
   formatWorkingDurationLabel,
   shouldNavigateAfterProjectRemoval,
   shouldClearThreadSelectionOnMouseDown,
+  shouldPlaceThreadInSettledSection,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
   pinOrderKeyBetween,
@@ -285,6 +286,44 @@ describe("hasUnseenCompletion", () => {
         session: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldPlaceThreadInSettledSection", () => {
+  const thread = {
+    hasActionableProposedPlan: false,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    interactionMode: "default" as const,
+    latestTurn: makeLatestTurn(),
+    session: null,
+  };
+
+  it("keeps an unread auto-settled completion active until it is reviewed", () => {
+    expect(
+      shouldPlaceThreadInSettledSection({
+        effectiveSettled: true,
+        explicitlySettled: false,
+        thread: { ...thread, lastVisitedAt: "2026-03-09T10:04:00.000Z" },
+      }),
+    ).toBe(false);
+    expect(
+      shouldPlaceThreadInSettledSection({
+        effectiveSettled: true,
+        explicitlySettled: false,
+        thread: { ...thread, lastVisitedAt: "2026-03-09T10:05:00.000Z" },
+      }),
+    ).toBe(true);
+  });
+
+  it("honors an explicit settle even when the completion is unread", () => {
+    expect(
+      shouldPlaceThreadInSettledSection({
+        effectiveSettled: true,
+        explicitlySettled: true,
+        thread: { ...thread, lastVisitedAt: "2026-03-09T10:04:00.000Z" },
+      }),
+    ).toBe(true);
   });
 });
 

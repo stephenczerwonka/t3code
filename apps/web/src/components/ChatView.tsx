@@ -8,6 +8,7 @@ import {
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
+  type ProviderUserInputAction,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
@@ -29,6 +30,7 @@ import {
 import {
   effectiveSettled,
   effectiveSnoozed,
+  resolveThreadAutoSettleChangeRequestState,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
@@ -158,6 +160,7 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
+  TriangleAlertIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
@@ -2176,6 +2179,7 @@ function ChatViewContent(props: ChatViewProps) {
             activePendingUserInput.questions,
             activePendingDraftAnswers,
             activePendingQuestionIndex,
+            activePendingUserInput.requiresReview === true,
           )
         : null,
     [activePendingDraftAnswers, activePendingQuestionIndex, activePendingUserInput],
@@ -4030,6 +4034,12 @@ function ChatViewContent(props: ChatViewProps) {
     threadBranch: activeThread?.branch ?? null,
     gitStatus: gitStatusQuery.data ?? null,
   });
+  const activeThreadPrState = activeThread
+    ? resolveThreadAutoSettleChangeRequestState({
+        threadCreatedAt: activeThread.createdAt,
+        changeRequest: activeThreadPr,
+      })
+    : null;
   const supportsSettlement = serverConfig?.environment.capabilities.threadSettlement === true;
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const nowMinute = useNowMinute();
@@ -4066,7 +4076,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const activeThreadWokeVisible = useMemo(() => {
     if (activeThreadWokeAt === null) return false;
-    if (activeThreadPr?.state === "merged" || activeThreadPr?.state === "closed") return false;
+    if (activeThreadPrState === "merged" || activeThreadPrState === "closed") return false;
     const wokeAtMs = Date.parse(activeThreadWokeAt);
     if (Number.isNaN(wokeAtMs)) return false;
     // Having the thread open counts as a visit at completedAt (the effect
@@ -4086,18 +4096,24 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeLatestTurn?.completedAt,
     activeThreadLastVisitedAt,
-    activeThreadPr?.state,
+    activeThreadPrState,
     activeThreadWokeAt,
   ]);
   const activeThreadSettled = useMemo(() => {
     if (activeThreadShell === null || !supportsSettlement) return false;
+    // The shell entry can lag the open detail view right after navigation; a
+    // session the detail view reports as live must win, or the banner flashes
+    // "settled" over a turn that is visibly running.
+    const detailSessionStatus = activeThread?.session?.status;
+    if (detailSessionStatus === "starting" || detailSessionStatus === "running") return false;
     return effectiveSettled(activeThreadShell, {
       now: `${nowMinute}:00.000Z`,
       autoSettleAfterDays,
-      changeRequestState: activeThreadPr?.state ?? null,
+      changeRequestState: activeThreadPrState,
     });
   }, [
-    activeThreadPr?.state,
+    activeThread?.session?.status,
+    activeThreadPrState,
     activeThreadShell,
     autoSettleAfterDays,
     nowMinute,
@@ -4365,6 +4381,48 @@ function ChatViewContent(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  const continueFailedTurn = () => {
+    const sendContext = composerRef.current?.getSendContext();
+    if (!sendContext) return;
+    const { hasSendableContent } = deriveComposerSendState({
+      prompt: sendContext.prompt,
+      imageCount: sendContext.images.length,
+      terminalContexts: sendContext.terminalContexts,
+      elementContextCount:
+        sendContext.elementContexts.length +
+        sendContext.previewAnnotations.length +
+        sendContext.reviewComments.length,
+    });
+    if (
+      !hasSendableContent &&
+      !composerRef.current?.insertTextAtEnd("Continue from where you left off.")
+    ) {
+      return;
+    }
+    void onSend();
+  };
+  // A turn that failed (transport error, provider crash, machine slept under
+  // it) looks dead-ended, but the provider session survives with its resume
+  // cursor. The banner clears itself once a new turn is running.
+  const failedTurnBannerItem: ComposerBannerStackItem | null = (() => {
+    const sessionStatus = activeThread?.session?.status;
+    const turnInFlight = sessionStatus === "starting" || sessionStatus === "running";
+    if (activeThread?.latestTurn?.state !== "error" || turnInFlight) {
+      return null;
+    }
+    return {
+      id: `turn-failed:${activeThread.id}:${activeThread.latestTurn.turnId}`,
+      variant: "info",
+      icon: <TriangleAlertIcon />,
+      title: "The last turn failed before it finished",
+      description: "The session can be resumed — send a message to continue where it left off.",
+      actions: (
+        <Button size="xs" variant="outline" onClick={continueFailedTurn}>
+          Continue
+        </Button>
+      ),
+    };
+  })();
   // The stack renders items[0] front-most and tucks the rest behind hover, so
   // ordering is priority: urgent system banners (error/warning variants plus
   // calm-styled live states flagged `urgent`, like update progress), then
@@ -4427,12 +4485,14 @@ function ChatViewContent(props: ChatViewProps) {
     const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const failedTurnItems = failedTurnBannerItem === null ? [] : [failedTurnBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...urgentSystemItems,
         ...backgroundLivenessItems,
+        ...failedTurnItems,
         ...calmSystemItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
@@ -4441,6 +4501,7 @@ function ChatViewContent(props: ChatViewProps) {
     return [
       ...urgentSystemItems,
       ...backgroundLivenessItems,
+      ...failedTurnItems,
       ...calmSystemItems,
       ...wokeThreadItems,
       {
@@ -4487,6 +4548,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    failedTurnBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
@@ -4782,13 +4844,13 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const onSend = async (
+  async function onSend(
     e?: { preventDefault: () => void },
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
-  ) => {
+  ) {
     e?.preventDefault();
     const notifyDirectAnnotationAttached = () => {
       if (!directAnnotation) return;
@@ -5233,7 +5295,7 @@ function ChatViewContent(props: ChatViewProps) {
       );
       resetLocalDispatch();
     }
-  };
+  }
 
   const onInterrupt = async () => {
     if (!activeThread) return;
@@ -5279,7 +5341,11 @@ function ChatViewContent(props: ChatViewProps) {
   );
 
   const onRespondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
+    async (
+      requestId: ApprovalRequestId,
+      answers: Record<string, unknown>,
+      action?: ProviderUserInputAction,
+    ) => {
       if (!activeThreadId) return;
 
       setRespondingUserInputRequestIds((existing) =>
@@ -5291,6 +5357,7 @@ function ChatViewContent(props: ChatViewProps) {
           threadId: activeThreadId,
           requestId,
           answers,
+          ...(action !== undefined ? { action } : {}),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -5320,7 +5387,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
 
   const onSelectActivePendingUserInputOption = useCallback(
-    (questionId: string, optionLabel: string) => {
+    (questionId: string, optionValue: string) => {
       if (!activePendingUserInput) {
         return;
       }
@@ -5341,7 +5408,7 @@ function ChatViewContent(props: ChatViewProps) {
             [questionId]: togglePendingUserInputOptionSelection(
               question,
               existing[activePendingUserInput.requestId]?.[questionId],
-              optionLabel,
+              optionValue,
             ),
           },
         };
@@ -5386,31 +5453,63 @@ function ChatViewContent(props: ChatViewProps) {
     [activePendingUserInput, composerRef],
   );
 
+  const onRespondToActivePendingUserInputAction = useCallback(
+    (action: ProviderUserInputAction) => {
+      if (!activePendingUserInput) {
+        return;
+      }
+      if (action === "accept") {
+        if (!activePendingResolvedAnswers) {
+          return;
+        }
+        void onRespondToUserInput(
+          activePendingUserInput.requestId,
+          activePendingResolvedAnswers,
+          activePendingUserInput.responseActions !== undefined ? action : undefined,
+        );
+        return;
+      }
+      void onRespondToUserInput(activePendingUserInput.requestId, {}, action);
+    },
+    [activePendingResolvedAnswers, activePendingUserInput, onRespondToUserInput],
+  );
+
   const onAdvanceActivePendingUserInput = useCallback(() => {
     if (!activePendingUserInput || !activePendingProgress) {
       return;
     }
+    if (activePendingProgress.isReviewing) {
+      onRespondToActivePendingUserInputAction("accept");
+      return;
+    }
     if (activePendingProgress.isLastQuestion) {
-      if (activePendingResolvedAnswers) {
-        void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
+      if (activePendingUserInput.requiresReview === true) {
+        setActivePendingUserInputQuestionIndex(activePendingUserInput.questions.length);
+      } else {
+        onRespondToActivePendingUserInputAction("accept");
       }
       return;
     }
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   }, [
     activePendingProgress,
-    activePendingResolvedAnswers,
     activePendingUserInput,
-    onRespondToUserInput,
+    onRespondToActivePendingUserInputAction,
     setActivePendingUserInputQuestionIndex,
   ]);
 
   const onPreviousActivePendingUserInputQuestion = useCallback(() => {
-    if (!activePendingProgress) {
+    if (!activePendingProgress || !activePendingUserInput) {
+      return;
+    }
+    if (activePendingProgress.isReviewing) {
+      setActivePendingUserInputQuestionIndex(
+        Math.max(activePendingUserInput.questions.length - 1, 0),
+      );
       return;
     }
     setActivePendingUserInputQuestionIndex(Math.max(activePendingProgress.questionIndex - 1, 0));
-  }, [activePendingProgress, setActivePendingUserInputQuestionIndex]);
+  }, [activePendingProgress, activePendingUserInput, setActivePendingUserInputQuestionIndex]);
 
   const onSubmitPlanFollowUp = useCallback(
     async ({
@@ -6045,7 +6144,7 @@ function ChatViewContent(props: ChatViewProps) {
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
             isServerThread={isServerThread}
-            changeRequestState={activeThreadPr?.state ?? null}
+            changeRequestState={activeThreadPrState}
             activeProjectName={activeProject?.title}
             activeProjectCwd={activeProject?.workspaceRoot ?? null}
             activeProjectFaviconPath={activeProject?.faviconPath ?? null}
@@ -6255,6 +6354,9 @@ function ChatViewContent(props: ChatViewProps) {
                             onRespondToApproval={onRespondToApproval}
                             onSelectActivePendingUserInputOption={
                               onSelectActivePendingUserInputOption
+                            }
+                            onRespondToActivePendingUserInputAction={
+                              onRespondToActivePendingUserInputAction
                             }
                             onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
                             onPreviousActivePendingUserInputQuestion={

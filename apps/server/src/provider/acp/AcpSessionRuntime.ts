@@ -49,6 +49,68 @@ export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStre
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+const defaultAuthenticationTimeout = Duration.minutes(5);
+/**
+ * A prompt turn has no bounded duration — a legitimate turn can think for
+ * minutes without emitting anything. What is never legitimate is total silence
+ * from the agent indefinitely, which leaves the turn pending forever with no
+ * way for a caller to observe it. This bounds *inactivity*, not turn length.
+ */
+const defaultPromptIdleTimeout = Duration.minutes(10);
+const defaultToolCallIdleTimeout = Duration.minutes(10);
+const promptIdlePollInterval = Duration.seconds(1);
+/**
+ * A tick gap beyond this means the machine was suspended (timers froze while
+ * the wall clock kept running), not that the event loop stalled.
+ */
+const promptIdleSuspensionGapThreshold = Duration.seconds(30);
+
+export function selectPromptIdleTimeout(input: {
+  readonly promptIdleTimeout: Duration.Duration;
+  readonly toolCallIdleTimeout: Duration.Duration;
+  readonly activeToolCallCount: number;
+}): Duration.Duration {
+  return input.activeToolCallCount > 0 ? input.toolCallIdleTimeout : input.promptIdleTimeout;
+}
+
+/**
+ * Reconciles idle time across system suspension. A suspended machine freezes
+ * timers while the wall clock jumps forward, so a naive `now - lastActivity`
+ * fires the idle timeout on the first tick after wake — precisely when the
+ * agent is about to resume. When the gap between watchdog ticks exceeds the
+ * suspension threshold and the last activity predates the gap, shift the
+ * activity baseline forward by the suspended span so only awake time counts
+ * as silence. Returns the shifted baseline when suspension was detected so
+ * the caller can persist it.
+ */
+export function discountSuspendedIdleTime(input: {
+  readonly nowMillis: number;
+  readonly lastTickAtMillis: number;
+  readonly lastActivityAtMillis: number;
+  readonly pollIntervalMillis: number;
+  readonly suspensionGapThresholdMillis: number;
+}): {
+  readonly effectiveIdleMillis: number;
+  readonly shiftedActivityAtMillis: number | undefined;
+} {
+  const tickGapMillis = input.nowMillis - input.lastTickAtMillis;
+  const gapStartedAtMillis = input.nowMillis - tickGapMillis;
+  if (
+    tickGapMillis > input.suspensionGapThresholdMillis &&
+    input.lastActivityAtMillis < gapStartedAtMillis
+  ) {
+    const shiftedActivityAtMillis =
+      input.lastActivityAtMillis + (tickGapMillis - input.pollIntervalMillis);
+    return {
+      effectiveIdleMillis: input.nowMillis - shiftedActivityAtMillis,
+      shiftedActivityAtMillis,
+    };
+  }
+  return {
+    effectiveIdleMillis: input.nowMillis - input.lastActivityAtMillis,
+    shiftedActivityAtMillis: undefined,
+  };
+}
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -58,17 +120,35 @@ export interface AcpSpawnInput {
 }
 
 export interface AcpSessionRuntimeOptions {
+  /** Bounds interactive provider authentication so startup cannot remain pending indefinitely. */
+  readonly authenticationTimeout?: Duration.Input;
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
+  readonly processForceKillAfter?: Duration.Input;
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /**
+   * How long a prompt turn may go without any agent activity before it fails.
+   * Activity is any `session/update` for this session. Defaults to
+   * {@link defaultPromptIdleTimeout}.
+   */
+  readonly promptIdleTimeout?: Duration.Input;
+  readonly toolCallIdleTimeout?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  readonly authMethodId:
+    | string
+    | ((initializeResult: EffectAcpSchema.InitializeResponse) => string);
+  /**
+   * Optional `_meta` payload attached to the `authenticate` request. Some
+   * agents (e.g. Devin) accept credentials such as API keys through
+   * authenticate metadata instead of environment variables.
+   */
+  readonly authenticateMeta?: Readonly<Record<string, unknown>>;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
@@ -259,11 +339,16 @@ type AcpStartState =
 interface AcpAssistantSegmentState {
   readonly nextSegmentIndex: number;
   readonly activeItemId?: string;
+  readonly activeStreamKind?: "assistant_text" | "reasoning_text";
 }
 
 interface EnsureActiveAssistantSegmentResult {
   readonly itemId: string;
   readonly startedEvent?: Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>;
+  readonly completedEvent?: Extract<
+    AcpParsedSessionEvent,
+    { readonly _tag: "AssistantItemCompleted" }
+  >;
 }
 
 export const make = (
@@ -297,6 +382,66 @@ export const make = (
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const lastAgentActivityAtMillisRef = yield* Ref.make<number | undefined>(undefined);
+    const promptIdleTimeout = Duration.fromInputUnsafe(
+      options.promptIdleTimeout ?? defaultPromptIdleTimeout,
+    );
+    const toolCallIdleTimeout = Duration.fromInputUnsafe(
+      options.toolCallIdleTimeout ?? defaultToolCallIdleTimeout,
+    );
+
+    /**
+     * Fails once the agent has been silent for longer than the idle timeout.
+     * Runs alongside the prompt RPC so a turn that will never settle surfaces
+     * as an error instead of pending forever.
+     */
+    const waitForPromptIdleTimeout = Effect.gen(function* () {
+      let lastTickAtMillis = yield* Clock.currentTimeMillis;
+      while (true) {
+        yield* Effect.sleep(promptIdlePollInterval);
+        const nowMillis = yield* Clock.currentTimeMillis;
+        const previousTickAtMillis = lastTickAtMillis;
+        lastTickAtMillis = nowMillis;
+        const lastActivityAtMillis = yield* Ref.get(lastAgentActivityAtMillisRef);
+        if (lastActivityAtMillis === undefined) {
+          continue;
+        }
+        const discounted = discountSuspendedIdleTime({
+          nowMillis,
+          lastTickAtMillis: previousTickAtMillis,
+          lastActivityAtMillis,
+          pollIntervalMillis: Duration.toMillis(promptIdlePollInterval),
+          suspensionGapThresholdMillis: Duration.toMillis(promptIdleSuspensionGapThreshold),
+        });
+        if (discounted.shiftedActivityAtMillis !== undefined) {
+          yield* Ref.set(lastAgentActivityAtMillisRef, discounted.shiftedActivityAtMillis);
+          continue;
+        }
+        let activeToolCallCount = 0;
+        for (const toolCall of (yield* Ref.get(toolCallsRef)).values()) {
+          if (toolCall.detail !== undefined) activeToolCallCount += 1;
+        }
+        const idleTimeoutMillis = Duration.toMillis(
+          selectPromptIdleTimeout({
+            promptIdleTimeout,
+            toolCallIdleTimeout,
+            activeToolCallCount,
+          }),
+        );
+        if (discounted.effectiveIdleMillis >= idleTimeoutMillis) {
+          const activity =
+            activeToolCallCount > 0
+              ? ` while ${activeToolCallCount} tool call${activeToolCallCount === 1 ? "" : "s"} remained active`
+              : "";
+          return yield* new EffectAcpErrors.AcpTransportError({
+            operation: "call-rpc",
+            method: "session/prompt",
+            detail: `session/prompt saw no agent activity${activity} for ${Math.round(discounted.effectiveIdleMillis / 1000)}s (idle timeout ${Math.round(idleTimeoutMillis / 1000)}s)`,
+            cause: undefined,
+          });
+        }
+      }
+    });
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -339,6 +484,9 @@ export const make = (
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
           ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
+          ...(options.processForceKillAfter
+            ? { forceKillAfter: options.processForceKillAfter }
+            : {}),
           shell: spawnCommand.shell,
         }),
       )
@@ -369,6 +517,10 @@ export const make = (
 
     yield* acp.handleSessionUpdate((notification) =>
       Effect.gen(function* () {
+        // Stamped before any routing decision: an update the runtime drops
+        // (replay, child session, pre-start) still proves the agent is alive,
+        // and treating it as silence would fail live turns.
+        yield* Ref.set(lastAgentActivityAtMillisRef, yield* Clock.currentTimeMillis);
         const gate = yield* Ref.get(sessionLoadGateRef);
         if (Option.isSome(gate) && gate.value.active) {
           const lastActivityAtMillis = yield* Clock.currentTimeMillis;
@@ -396,6 +548,7 @@ export const make = (
         yield* handleSessionUpdate({
           queue: eventQueue,
           modeStateRef,
+          configOptionsRef,
           toolCallsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
@@ -542,14 +695,31 @@ export const make = (
       );
 
       const authenticatePayload = {
-        methodId: options.authMethodId,
+        methodId:
+          typeof options.authMethodId === "function"
+            ? options.authMethodId(initializeResult)
+            : options.authMethodId,
+        ...(options.authenticateMeta ? { _meta: options.authenticateMeta } : {}),
       } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
+      const authenticationResult = yield* runLoggedRequest(
         "authenticate",
         authenticatePayload,
         acp.agent.authenticate(authenticatePayload),
+      ).pipe(
+        Effect.timeoutOption(
+          Duration.fromInputUnsafe(options.authenticationTimeout ?? defaultAuthenticationTimeout),
+        ),
       );
+      if (Option.isNone(authenticationResult)) {
+        return yield* new EffectAcpErrors.AcpTransportError({
+          operation: "call-rpc",
+          method: "authenticate",
+          detail:
+            "ACP authentication timed out because the provider did not complete authentication before the startup timeout expired.",
+          cause: undefined,
+        });
+      }
 
       let sessionId: string;
       let sessionSetupResult:
@@ -724,6 +894,7 @@ export const make = (
               queue: eventQueue,
               assistantSegmentRef,
             });
+            yield* Ref.set(toolCallsRef, new Map());
             const requestPayload = {
               sessionId: started.sessionId,
               ...payload,
@@ -737,7 +908,13 @@ export const make = (
               acp.agent.prompt(requestPayload),
             ).pipe(Effect.forkIn(runtimeScope));
             yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
-            return yield* Fiber.join(promptRpcFiber).pipe(
+            // Idle is measured from the start of this turn, not from whatever
+            // the previous turn happened to leave behind.
+            yield* Ref.set(lastAgentActivityAtMillisRef, yield* Clock.currentTimeMillis);
+            return yield* Effect.raceFirst(
+              Fiber.join(promptRpcFiber),
+              waitForPromptIdleTimeout,
+            ).pipe(
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)
                   ? Effect.succeed(cancelledResponse)
@@ -844,6 +1021,7 @@ function configOptionCurrentValueMatches(
 const handleSessionUpdate = ({
   queue,
   modeStateRef,
+  configOptionsRef,
   toolCallsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
@@ -851,6 +1029,7 @@ const handleSessionUpdate = ({
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
+  readonly configOptionsRef: Ref.Ref<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
@@ -864,6 +1043,10 @@ const handleSessionUpdate = ({
       );
     }
     for (const event of parsed.events) {
+      if (event._tag === "ConfigOptionsUpdated") {
+        yield* Ref.set(configOptionsRef, event.configOptions);
+        continue;
+      }
       if (event._tag === "ToolCallUpdated") {
         yield* closeActiveAssistantSegment({
           queue,
@@ -893,7 +1076,10 @@ const handleSessionUpdate = ({
       if (event._tag === "ContentDelta") {
         if (event.text.trim().length === 0) {
           const assistantSegmentState = yield* Ref.get(assistantSegmentRef);
-          if (!assistantSegmentState.activeItemId) {
+          if (
+            !assistantSegmentState.activeItemId ||
+            assistantSegmentState.activeStreamKind !== event.streamKind
+          ) {
             continue;
           }
         }
@@ -902,6 +1088,7 @@ const handleSessionUpdate = ({
           assistantSegmentRef,
           sessionId: params.sessionId,
           assistantItemRuntimeId,
+          streamKind: event.streamKind,
         });
         yield* Queue.offer(queue, {
           ...event,
@@ -947,39 +1134,58 @@ const ensureActiveAssistantSegment = ({
   assistantSegmentRef,
   sessionId,
   assistantItemRuntimeId,
+  streamKind,
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
   readonly assistantItemRuntimeId: string;
+  readonly streamKind: "assistant_text" | "reasoning_text";
 }) =>
   Ref.modify<AcpAssistantSegmentState, EnsureActiveAssistantSegmentResult>(
     assistantSegmentRef,
     (current) => {
-      if (current.activeItemId) {
+      if (current.activeItemId && current.activeStreamKind === streamKind) {
         return [{ itemId: current.activeItemId }, current] as const;
       }
       const itemId = assistantItemId(sessionId, assistantItemRuntimeId, current.nextSegmentIndex);
+      const completedEvent = current.activeItemId
+        ? ({
+            _tag: "AssistantItemCompleted",
+            itemId: current.activeItemId,
+            streamKind: current.activeStreamKind ?? "assistant_text",
+          } satisfies AcpParsedSessionEvent)
+        : undefined;
       return [
         {
           itemId,
+          ...(completedEvent ? { completedEvent } : {}),
           startedEvent: {
             _tag: "AssistantItemStarted",
             itemId,
+            streamKind,
           } satisfies Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>,
         },
         {
           nextSegmentIndex: current.nextSegmentIndex + 1,
           activeItemId: itemId,
+          activeStreamKind: streamKind,
         } satisfies AcpAssistantSegmentState,
       ] as const;
     },
   ).pipe(
-    Effect.flatMap((result) =>
-      result.startedEvent
-        ? Queue.offer(queue, result.startedEvent).pipe(Effect.as(result.itemId))
-        : Effect.succeed(result.itemId),
-    ),
+    Effect.flatMap((result) => {
+      const startedEvent = result.startedEvent;
+      return startedEvent
+        ? Effect.gen(function* () {
+            if (result.completedEvent) {
+              yield* Queue.offer(queue, result.completedEvent);
+            }
+            yield* Queue.offer(queue, startedEvent);
+            return result.itemId;
+          })
+        : Effect.succeed(result.itemId);
+    }),
   );
 
 const closeActiveAssistantSegment = ({
@@ -997,6 +1203,7 @@ const closeActiveAssistantSegment = ({
       {
         _tag: "AssistantItemCompleted",
         itemId: current.activeItemId,
+        streamKind: current.activeStreamKind ?? "assistant_text",
       } satisfies AcpParsedSessionEvent,
       {
         nextSegmentIndex: current.nextSegmentIndex,

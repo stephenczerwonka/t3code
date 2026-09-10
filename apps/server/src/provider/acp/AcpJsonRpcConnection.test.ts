@@ -7,6 +7,9 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
@@ -20,6 +23,78 @@ const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
 const mockAgentCommand = "node";
 const mockAgentArgs = [mockAgentPath];
+
+describe("discountSuspendedIdleTime", () => {
+  const base = {
+    pollIntervalMillis: 1_000,
+    suspensionGapThresholdMillis: 30_000,
+  };
+
+  it("counts idle normally when ticks are regular", () => {
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 100_000,
+      lastTickAtMillis: 99_000,
+      lastActivityAtMillis: 40_000,
+    });
+    expect(result.effectiveIdleMillis).toBe(60_000);
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+  });
+
+  it("discounts a suspended gap so the idle timeout cannot fire on wake", () => {
+    // 99 minutes between ticks (machine asleep), activity just before sleep.
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 10_000_000,
+      lastTickAtMillis: 4_000_000,
+      lastActivityAtMillis: 3_999_500,
+    });
+    expect(result.shiftedActivityAtMillis).toBe(3_999_500 + (6_000_000 - 1_000));
+    expect(result.effectiveIdleMillis).toBe(1_500);
+  });
+
+  it("does not shift a baseline refreshed after the gap", () => {
+    // Activity arrived during/after the gap (post-wake): keep it untouched.
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 10_000_000,
+      lastTickAtMillis: 4_000_000,
+      lastActivityAtMillis: 9_999_000,
+    });
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+    expect(result.effectiveIdleMillis).toBe(1_000);
+  });
+
+  it("treats a gap at the threshold as a stall, not a suspension", () => {
+    const result = AcpSessionRuntime.discountSuspendedIdleTime({
+      ...base,
+      nowMillis: 130_000,
+      lastTickAtMillis: 100_000,
+      lastActivityAtMillis: 0,
+    });
+    expect(result.shiftedActivityAtMillis).toBeUndefined();
+    expect(result.effectiveIdleMillis).toBe(130_000);
+  });
+
+  it("uses a shorter timeout while tool calls remain active", () => {
+    const promptIdleTimeout = Duration.minutes(60);
+    const toolCallIdleTimeout = Duration.minutes(10);
+    expect(
+      AcpSessionRuntime.selectPromptIdleTimeout({
+        promptIdleTimeout,
+        toolCallIdleTimeout,
+        activeToolCallCount: 0,
+      }),
+    ).toEqual(promptIdleTimeout);
+    expect(
+      AcpSessionRuntime.selectPromptIdleTimeout({
+        promptIdleTimeout,
+        toolCallIdleTimeout,
+        activeToolCallCount: 3,
+      }),
+    ).toEqual(toolCallIdleTimeout);
+  });
+});
 
 describe("AcpSessionRuntime", () => {
   it.effect("merges custom initialize client capabilities into the ACP handshake", () => {
@@ -153,6 +228,53 @@ describe("AcpSessionRuntime", () => {
     }).pipe(Effect.provide(NodeServices.layer));
   });
 
+  it.effect("keeps interleaved reasoning and assistant segments stable and distinct", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "think" }] });
+
+      const events = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 10)));
+      const deltas = events.filter((event) => event._tag === "ContentDelta");
+      expect(deltas.map((event) => [event.streamKind, event.text])).toEqual([
+        ["reasoning_text", "reasoning one"],
+        ["reasoning_text", " and two"],
+        ["assistant_text", "answer"],
+        ["reasoning_text", "final thought"],
+      ]);
+      expect(deltas[0]?.itemId).toBe(deltas[1]?.itemId);
+      expect(deltas[2]?.itemId).not.toBe(deltas[0]?.itemId);
+      expect(deltas[3]?.itemId).not.toBe(deltas[2]?.itemId);
+      expect(events.map((event) => event._tag)).toEqual([
+        "AssistantItemStarted",
+        "ContentDelta",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_EMIT_INTERLEAVED_THOUGHTS: "1" },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("drops session updates emitted for a child ACP session", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
@@ -228,6 +350,40 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  it.effect("refreshes config options from session updates", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "refresh config" }] });
+
+      expect(yield* runtime.getConfigOptions).toEqual([
+        {
+          id: "mode",
+          name: "Mode",
+          category: "mode",
+          type: "select",
+          currentValue: "architect",
+          options: [{ value: "architect", name: "Architect" }],
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: { T3_ACP_EMIT_CONFIG_OPTION_UPDATE: "1" },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.effect("releases a fully silent prompt when session/cancel is requested", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
@@ -262,6 +418,182 @@ describe("AcpSessionRuntime", () => {
           cwd: process.cwd(),
           clientInfo: { name: "t3-test", version: "0.0.0" },
           authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("fails a prompt the agent leaves silent past the idle timeout", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang forever" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* TestClock.adjust("31 seconds");
+
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("no agent activity");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "30 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("does not carry active tool liveness into the next prompt", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      expect(
+        yield* runtime.prompt({
+          prompt: [{ type: "text", text: "leave a tool active" }],
+        }),
+      ).toMatchObject({ stopReason: "end_turn" });
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang without tools" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* TestClock.adjust("61 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 60s");
+        expect(error.detail).not.toContain("tool call");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_LEAVE_TOOL_ACTIVE_ON_FIRST_PROMPT: "1",
+              T3_ACP_HANG_SECOND_PROMPT_FOREVER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("does not treat an invisible tool placeholder as active work", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang after a generic placeholder" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      const placeholderFollowup = Array.from(
+        yield* Stream.runCollect(Stream.take(runtime.getEvents(), 1)),
+      );
+      expect(placeholderFollowup[0]?._tag).toBe("AssistantItemStarted");
+      yield* TestClock.adjust("61 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 60s");
+        expect(error.detail).not.toContain("tool call");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_ORPHAN_GENERIC_TOOL_PLACEHOLDER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("uses the shorter idle timeout for visible active work", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang during visible work" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      const activeTool = Array.from(yield* Stream.runCollect(Stream.take(runtime.getEvents(), 1)));
+      expect(activeTool[0]?._tag).toBe("ToolCallUpdated");
+      yield* TestClock.adjust("11 seconds");
+      const exit = yield* Fiber.join(promptFiber).pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as { readonly detail?: string };
+        expect(error.detail).toContain("idle timeout 10s");
+        expect(error.detail).toContain("1 tool call remained active");
+      }
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          promptIdleTimeout: "60 seconds",
+          toolCallIdleTimeout: "10 seconds",
         }),
       ),
       Effect.scoped,

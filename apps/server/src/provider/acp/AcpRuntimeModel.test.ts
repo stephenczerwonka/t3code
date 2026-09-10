@@ -5,6 +5,9 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import {
   extractModelConfigId,
   mergeToolCallState,
+  normalizeAcpPromptUsage,
+  normalizeAcpAvailableCommands,
+  normalizeAcpUsageUpdate,
   parsePermissionRequest,
   parseSessionModeState,
   parseSessionUpdateEvent,
@@ -273,6 +276,86 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("normalizes live and final ACP usage without losing compacted active context", () => {
+    const live = normalizeAcpUsageUpdate({
+      used: 0,
+      size: 200_000,
+    });
+    expect(live).toEqual({ usedTokens: 0, maxTokens: 200_000 });
+
+    const final = normalizeAcpPromptUsage(
+      {
+        totalTokens: 420,
+        inputTokens: 300,
+        outputTokens: 100,
+        thoughtTokens: 20,
+        cachedReadTokens: 50,
+        cachedWriteTokens: 10,
+      },
+      live,
+    );
+    expect(final).toEqual({
+      usedTokens: 0,
+      maxTokens: 200_000,
+      totalProcessedTokens: 420,
+      inputTokens: 300,
+      outputTokens: 100,
+      reasoningOutputTokens: 20,
+      cachedInputTokens: 50,
+    });
+
+    expect(normalizeAcpUsageUpdate({ used: 120, size: 100 }, final)).toBeUndefined();
+  });
+
+  it("normalizes and deduplicates ACP provider commands", () => {
+    expect(
+      normalizeAcpAvailableCommands([
+        { name: " /btw ", description: "", input: { hint: " message " } },
+        { name: "BTW", description: "Ask in the background", input: null },
+        { name: " loop ", description: "Run repeatedly" },
+        { name: " / ", description: "ignored" },
+      ]),
+    ).toEqual([
+      { name: "btw", description: "Ask in the background", input: { hint: "message" } },
+      { name: "loop", description: "Run repeatedly" },
+    ]);
+  });
+
+  it("parses dynamic ACP config option snapshots", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "architect",
+            options: [{ value: "architect", name: "Architect" }],
+          },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "ConfigOptionsUpdated",
+        configOptions: [
+          {
+            id: "mode",
+            name: "Mode",
+            category: "mode",
+            type: "select",
+            currentValue: "architect",
+            options: [{ value: "architect", name: "Architect" }],
+          },
+        ],
+      },
+    ]);
+  });
+
   it("projects typed ACP plan and content updates", () => {
     const planResult = parseSessionUpdateEvent({
       sessionId: "session-1",
@@ -321,6 +404,7 @@ describe("AcpRuntimeModel", () => {
     expect(contentResult.events).toEqual([
       {
         _tag: "ContentDelta",
+        streamKind: "assistant_text",
         text: "hello from acp",
         rawPayload: {
           sessionId: "session-1",
@@ -329,6 +413,35 @@ describe("AcpRuntimeModel", () => {
             content: {
               type: "text",
               text: "hello from acp",
+            },
+          },
+        },
+      },
+    ]);
+
+    const thoughtResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: {
+          type: "text",
+          text: "considering the options",
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(thoughtResult.events).toEqual([
+      {
+        _tag: "ContentDelta",
+        streamKind: "reasoning_text",
+        text: "considering the options",
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: {
+              type: "text",
+              text: "considering the options",
             },
           },
         },

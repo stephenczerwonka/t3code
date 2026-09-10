@@ -16,6 +16,7 @@ import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shar
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -1003,6 +1004,55 @@ const make = Effect.gen(function* () {
       { discard: true },
     );
   });
+  const reconcileUnownedProjectedSessions = Effect.fn("reconcileUnownedProjectedSessions")(
+    function* () {
+      const [readModel, activeSessions] = yield* Effect.all([
+        projectionSnapshotQuery.getCommandReadModel(),
+        providerService.listSessions(),
+      ]);
+      const ownedThreadIds = new Set(activeSessions.map((session) => session.threadId));
+      yield* Effect.forEach(
+        readModel.threads,
+        (thread) => {
+          const session = thread.session;
+          if (
+            session === null ||
+            (session.status !== "starting" && session.status !== "running") ||
+            ownedThreadIds.has(thread.id)
+          ) {
+            return Effect.void;
+          }
+          return Effect.gen(function* () {
+            const interruptedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* setThreadSession({
+              threadId: thread.id,
+              session: {
+                ...session,
+                status: "interrupted",
+                activeTurnId: null,
+                updatedAt: interruptedAt,
+              },
+              createdAt: interruptedAt,
+            });
+          }).pipe(
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.interrupt;
+              }
+              return Effect.logWarning(
+                "provider command reactor failed to interrupt an unowned projected session",
+                {
+                  threadId: thread.id,
+                  cause: Cause.pretty(cause),
+                },
+              );
+            }),
+          );
+        },
+        { discard: true },
+      );
+    },
+  );
   const processThreadTitleRegenerationSafely = Effect.fn("processThreadTitleRegenerationSafely")(
     function* (event: Extract<ProviderIntentEvent, { type: "thread.meta-updated" }>) {
       if (event.payload.regenerateTitle !== true) {
@@ -1276,6 +1326,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           requestId: event.payload.requestId,
           answers: event.payload.answers,
+          ...(event.payload.action !== undefined ? { action: event.payload.action } : {}),
         })
         .pipe(
           Effect.catchCause((cause) =>
@@ -1433,11 +1484,23 @@ const make = Effect.gen(function* () {
         );
       }),
     );
+    const reconcileUnowned = reconcileUnownedProjectedSessions().pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.interrupt;
+        }
+        return Effect.logWarning(
+          "provider command reactor failed to reconcile unowned projected sessions",
+          { cause: Cause.pretty(cause) },
+        );
+      }),
+    );
+    const startupRecovery = clearInterrupted.pipe(Effect.andThen(reconcileUnowned));
     const activation = yield* ServerActivation;
     if (activation === undefined) {
-      yield* clearInterrupted;
+      yield* startupRecovery;
     } else {
-      yield* forkParked(clearInterrupted);
+      yield* forkParked(startupRecovery);
     }
   });
 

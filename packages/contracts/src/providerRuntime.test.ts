@@ -79,18 +79,24 @@ describe("ProviderRuntimeEvent", () => {
       threadId: "thread-2",
       requestId: "request-1",
       payload: {
+        message: "Review the requested sandbox configuration.",
+        responseActions: ["decline", "cancel"],
+        requiresReview: true,
         questions: [
           {
             id: "sandbox_mode",
             header: "Sandbox",
             question: "Which mode should be used?",
+            required: true,
             options: [
               {
-                label: "workspace-write",
+                label: "Workspace",
+                value: "workspace-write",
                 description: "Allow edits in workspace only",
               },
               {
-                label: "danger-full-access",
+                label: "Full access",
+                value: "danger-full-access",
                 description: "Allow unrestricted access",
               },
             ],
@@ -103,8 +109,12 @@ describe("ProviderRuntimeEvent", () => {
     if (parsed.type !== "user-input.requested") {
       throw new Error("expected user-input.requested");
     }
+    expect(parsed.payload.message).toBe("Review the requested sandbox configuration.");
+    expect(parsed.payload.responseActions).toEqual(["decline", "cancel"]);
+    expect(parsed.payload.requiresReview).toBe(true);
     expect(parsed.payload.questions[0]?.id).toBe("sandbox_mode");
-    expect(parsed.payload.questions[0]?.options).toHaveLength(2);
+    expect(parsed.payload.questions[0]?.required).toBe(true);
+    expect(parsed.payload.questions[0]?.options[0]?.value).toBe("workspace-write");
   });
 
   it("decodes user-input.resolved with answer map", () => {
@@ -117,6 +127,7 @@ describe("ProviderRuntimeEvent", () => {
       threadId: "thread-2",
       requestId: "request-1",
       payload: {
+        action: "accept",
         answers: {
           sandbox_mode: "workspace-write",
         },
@@ -127,6 +138,7 @@ describe("ProviderRuntimeEvent", () => {
     if (parsed.type !== "user-input.resolved") {
       throw new Error("expected user-input.resolved");
     }
+    expect(parsed.payload.action).toBe("accept");
     expect(parsed.payload.answers.sandbox_mode).toBe("workspace-write");
   });
 

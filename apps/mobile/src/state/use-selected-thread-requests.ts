@@ -1,7 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useMemo, useState } from "react";
 
-import { ApprovalRequestId, type ProviderApprovalDecision } from "@t3tools/contracts";
+import {
+  ApprovalRequestId,
+  type ProviderApprovalDecision,
+  type ProviderUserInputAction,
+  type UserInputQuestion,
+} from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import { threadEnvironment } from "../state/threads";
@@ -12,6 +17,7 @@ import {
   derivePendingUserInputs,
   setPendingUserInputCustomAnswer,
   sortThreadActivities,
+  togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "../lib/threadActivity";
 import { appAtomRegistry } from "./atom-registry";
@@ -23,15 +29,21 @@ const userInputDraftsByRequestKeyAtom = Atom.make<
   Record<string, Record<string, PendingUserInputDraftAnswer>>
 >({}).pipe(Atom.keepAlive, Atom.withLabel("mobile:user-input-drafts"));
 
-function setUserInputDraftOption(requestKey: string, questionId: string, label: string): void {
+function setUserInputDraftOption(
+  requestKey: string,
+  question: UserInputQuestion,
+  optionValue: string,
+): void {
   const current = appAtomRegistry.get(userInputDraftsByRequestKeyAtom);
   appAtomRegistry.set(userInputDraftsByRequestKeyAtom, {
     ...current,
     [requestKey]: {
       ...current[requestKey],
-      [questionId]: {
-        selectedOptionLabel: label,
-      },
+      [question.id]: togglePendingUserInputOptionSelection(
+        question,
+        current[requestKey]?.[question.id],
+        optionValue,
+      ),
     },
   });
 }
@@ -97,15 +109,19 @@ export function useSelectedThreadRequests() {
     : null;
 
   const onSelectUserInputOption = useCallback(
-    (requestId: ApprovalRequestId, questionId: string, label: string) => {
-      if (!selectedThreadShell) {
+    (requestId: ApprovalRequestId, questionId: string, optionValue: string) => {
+      if (!selectedThreadShell || !activePendingUserInput) {
+        return;
+      }
+      const question = activePendingUserInput.questions.find((entry) => entry.id === questionId);
+      if (!question) {
         return;
       }
 
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
-      setUserInputDraftOption(requestKey, questionId, label);
+      setUserInputDraftOption(requestKey, question, optionValue);
     },
-    [selectedThreadShell],
+    [activePendingUserInput, selectedThreadShell],
   );
 
   const onChangeUserInputCustomAnswer = useCallback(
@@ -141,30 +157,38 @@ export function useSelectedThreadRequests() {
     [respondToApproval, selectedThreadShell],
   );
 
-  const onSubmitUserInput = useCallback(async () => {
-    if (!selectedThreadShell || !activePendingUserInput || !activePendingUserInputAnswers) {
-      return;
-    }
+  const onSubmitUserInput = useCallback(
+    async (action: ProviderUserInputAction = "accept") => {
+      if (
+        !selectedThreadShell ||
+        !activePendingUserInput ||
+        (action === "accept" && !activePendingUserInputAnswers)
+      ) {
+        return;
+      }
 
-    setRespondingUserInputId(activePendingUserInput.requestId);
-    const result = await respondToUserInput({
-      environmentId: selectedThreadShell.environmentId,
-      input: {
-        threadId: selectedThreadShell.id,
-        requestId: activePendingUserInput.requestId,
-        answers: activePendingUserInputAnswers,
-      },
-    });
-    setRespondingUserInputId((current) =>
-      current === activePendingUserInput.requestId ? null : current,
-    );
-    return result;
-  }, [
-    activePendingUserInput,
-    activePendingUserInputAnswers,
-    respondToUserInput,
-    selectedThreadShell,
-  ]);
+      setRespondingUserInputId(activePendingUserInput.requestId);
+      const result = await respondToUserInput({
+        environmentId: selectedThreadShell.environmentId,
+        input: {
+          threadId: selectedThreadShell.id,
+          requestId: activePendingUserInput.requestId,
+          answers: action === "accept" ? (activePendingUserInputAnswers ?? {}) : {},
+          ...(activePendingUserInput.responseActions !== undefined ? { action } : {}),
+        },
+      });
+      setRespondingUserInputId((current) =>
+        current === activePendingUserInput.requestId ? null : current,
+      );
+      return result;
+    },
+    [
+      activePendingUserInput,
+      activePendingUserInputAnswers,
+      respondToUserInput,
+      selectedThreadShell,
+    ],
+  );
 
   return {
     activePendingApproval,

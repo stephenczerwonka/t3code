@@ -163,6 +163,7 @@ describe("AcpCoreRuntimeEvents", () => {
         threadId: "thread-1" as never,
         turnId,
         itemId: "assistant:session-1:segment:0",
+        streamKind: "assistant_text",
         text: "hello",
         rawPayload: { sessionId: "session-1" },
       }),
@@ -182,6 +183,7 @@ describe("AcpCoreRuntimeEvents", () => {
         turnId,
         itemId: "assistant:session-1:segment:0",
         lifecycle: "item.started",
+        streamKind: "assistant_text",
       }),
     ).toMatchObject({
       type: "item.started",

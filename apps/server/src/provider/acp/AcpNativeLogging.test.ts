@@ -9,12 +9,25 @@ import * as Schema from "effect/Schema";
 import * as AcpErrors from "effect-acp/errors";
 
 import type { EventNdjsonLogger } from "../Layers/EventNdjsonLogger.ts";
-import { makeAcpNativeLoggerFactory } from "./AcpNativeLogging.ts";
+import { makeAcpNativeLoggerFactory, summarizeAcpNativePayload } from "./AcpNativeLogging.ts";
 
 const nodeServicesIt = it.layer(NodeServices.layer);
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 nodeServicesIt("ACP native logging", (it) => {
+  it("summarizes extension notifications without recording raw content", () => {
+    const secret = "secret-cognition-output";
+    const summary = summarizeAcpNativePayload({
+      sessionId: "session-1",
+      message: secret,
+      nested: { token: secret },
+    });
+
+    const serialized = encodeUnknownJson(summary);
+    assert.notInclude(serialized, secret);
+    assert.deepStrictEqual(summary, { valueType: "object", fieldCount: 3 });
+  });
+
   it.effect("records bounded request and protocol diagnostics without raw payloads", () =>
     Effect.gen(function* () {
       const records: Array<unknown> = [];
@@ -64,6 +77,45 @@ nodeServicesIt("ACP native logging", (it) => {
       assert.include(serialized, '"reasonCount":1');
       assert.include(serialized, '"valueType":"string"');
       assert.include(serialized, '"messageTag":"Request"');
+    }),
+  );
+
+  it.effect("identifies protocol messages by envelope without recording content", () =>
+    Effect.gen(function* () {
+      const records: Array<unknown> = [];
+      const nativeEventLogger: EventNdjsonLogger = {
+        filePath: "/tmp/provider-native.ndjson",
+        write: (event) => Effect.sync(() => void records.push(event)),
+        close: () => Effect.void,
+      };
+      const makeLogger = yield* makeAcpNativeLoggerFactory();
+      const logger = makeLogger({
+        nativeEventLogger,
+        provider: ProviderDriverKind.make("devin"),
+        threadId: ThreadId.make("thread-1"),
+      });
+      const protocolLogger = logger.protocolLogging?.logger;
+      assert.exists(protocolLogger);
+      if (!protocolLogger) return;
+
+      const secret = "secret-prompt-body";
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "raw",
+        payload: `{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"note":"${secret}"}}`,
+      });
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "decoded",
+        payload: [{ _tag: "Request", tag: "fs/read_text_file", id: 7, payload: { path: secret } }],
+      });
+
+      const serialized = encodeUnknownJson(records);
+      assert.notInclude(serialized, secret);
+      assert.include(serialized, '"method":"session/request_permission"');
+      assert.include(serialized, '"requestId":42');
+      assert.include(serialized, '"method":"fs/read_text_file"');
+      assert.include(serialized, '"requestId":7');
     }),
   );
 

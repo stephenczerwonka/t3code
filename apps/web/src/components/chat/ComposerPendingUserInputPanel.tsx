@@ -1,19 +1,22 @@
-import { type ApprovalRequestId } from "@t3tools/contracts";
+import { type ApprovalRequestId, type ProviderUserInputAction } from "@t3tools/contracts";
 import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
 import { type PendingUserInput } from "../../session-logic";
 import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
+  resolvePendingUserInputAnswer,
 } from "../../pendingUserInput";
 import { CheckIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import { Button } from "../ui/button";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: PendingUserInput[];
   respondingRequestIds: ApprovalRequestId[];
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
-  onToggleOption: (questionId: string, optionLabel: string) => void;
+  onToggleOption: (questionId: string, optionValue: string) => void;
+  onRespond: (action: ProviderUserInputAction) => void;
   onAdvance: () => void;
 }
 
@@ -23,6 +26,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   answers,
   questionIndex,
   onToggleOption,
+  onRespond,
   onAdvance,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
@@ -37,6 +41,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
+      onRespond={onRespond}
       onAdvance={onAdvance}
     />
   );
@@ -48,22 +53,29 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers,
   questionIndex,
   onToggleOption,
+  onRespond,
   onAdvance,
 }: {
   prompt: PendingUserInput;
   isResponding: boolean;
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
-  onToggleOption: (questionId: string, optionLabel: string) => void;
+  onToggleOption: (questionId: string, optionValue: string) => void;
+  onRespond: (action: ProviderUserInputAction) => void;
   onAdvance: () => void;
 }) {
-  const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
+  const progress = derivePendingUserInputProgress(
+    prompt.questions,
+    answers,
+    questionIndex,
+    prompt.requiresReview === true,
+  );
   const activeQuestion = progress.activeQuestion;
   const autoAdvanceTimerRef = useRef<number | null>(null);
   const onAdvanceRef = useRef(onAdvance);
   const [optimisticSingleSelect, setOptimisticSingleSelect] = useState<{
     questionId: string;
-    optionLabel: string;
+    optionValue: string;
   } | null>(null);
 
   useEffect(() => {
@@ -80,7 +92,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     }
     if (
       progress.customAnswer.trim().length === 0 &&
-      progress.selectedOptionLabels.includes(optimisticSingleSelect.optionLabel)
+      progress.selectedOptionLabels.includes(optimisticSingleSelect.optionValue)
     ) {
       setOptimisticSingleSelect(null);
     }
@@ -100,13 +112,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
   }, []);
 
-  const handleOptionSelection = useEffectEvent((questionId: string, optionLabel: string) => {
+  const handleOptionSelection = useEffectEvent((questionId: string, optionValue: string) => {
     if (activeQuestion?.multiSelect) {
-      onToggleOption(questionId, optionLabel);
+      onToggleOption(questionId, optionValue);
       return;
     }
-    setOptimisticSingleSelect({ questionId, optionLabel });
-    onToggleOption(questionId, optionLabel);
+    setOptimisticSingleSelect({ questionId, optionValue });
+    onToggleOption(questionId, optionValue);
     if (autoAdvanceTimerRef.current !== null) {
       window.clearTimeout(autoAdvanceTimerRef.current);
     }
@@ -140,24 +152,88 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       const option = activeQuestion.options[optionIndex];
       if (!option) return;
       event.preventDefault();
-      handleOptionSelection(activeQuestion.id, option.label);
+      handleOptionSelection(activeQuestion.id, option.value ?? option.label);
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [activeQuestion, isResponding]);
 
-  if (!activeQuestion) {
-    return null;
+  const responseActions = prompt.responseActions ?? [];
+  const actionButtons =
+    responseActions.length > 0 ? (
+      <div className="mt-3 flex items-center justify-end gap-2">
+        {responseActions.includes("decline") ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={isResponding}
+            onClick={() => onRespond("decline")}
+          >
+            Decline
+          </Button>
+        ) : null}
+        {responseActions.includes("cancel") ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={isResponding}
+            onClick={() => onRespond("cancel")}
+          >
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+    ) : null;
+
+  if (progress.isReviewing || !activeQuestion) {
+    return (
+      <div className="px-4 py-3 sm:px-5">
+        <span className="text-secondary-label text-[11px] font-semibold tracking-widest uppercase">
+          Review
+        </span>
+        {prompt.message ? (
+          <p className="mt-2 text-sm text-foreground/90">{prompt.message}</p>
+        ) : null}
+        {prompt.questions.length > 0 ? (
+          <div className="mt-3 space-y-2">
+            {prompt.questions.map((question) => {
+              const answer = resolvePendingUserInputAnswer(question, answers[question.id]);
+              const values = answer === null ? [] : Array.isArray(answer) ? answer : [answer];
+              const display = values.map(
+                (value) =>
+                  question.options.find((option) => (option.value ?? option.label) === value)
+                    ?.label ?? value,
+              );
+              return (
+                <div key={question.id} className="rounded-lg bg-muted/30 px-3 py-2">
+                  <p className="text-secondary-label text-xs">{question.header}</p>
+                  <p className="mt-0.5 text-sm text-foreground/90">
+                    {display.length > 0 ? display.join(", ") : "Skipped"}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {actionButtons}
+      </div>
+    );
   }
 
   const customAnswerActive = progress.customAnswer.trim().length > 0;
 
   return (
     <div className="px-4 py-3 sm:px-5">
+      {prompt.message ? <p className="mb-3 text-sm text-foreground/90">{prompt.message}</p> : null}
       <div className="mb-2 flex items-center gap-3">
         <span className="text-secondary-label text-[11px] font-semibold tracking-widest uppercase">
           {activeQuestion.header}
         </span>
+        {activeQuestion.required === false ? (
+          <span className="text-secondary-label text-[10px]">Optional</span>
+        ) : null}
         {prompt.questions.length > 1 ? (
           <span className="flex h-5 items-center rounded-md bg-muted/60 px-1.5 text-secondary-label text-[10px] font-medium tabular-nums">
             {questionIndex + 1}/{prompt.questions.length}
@@ -170,12 +246,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       ) : null}
       <div className="mt-3 space-y-1.5">
         {activeQuestion.options.map((option, index) => {
+          const optionValue = option.value ?? option.label;
           const isOptimisticallySelected =
             optimisticSingleSelect?.questionId === activeQuestion.id &&
-            optimisticSingleSelect.optionLabel === option.label;
+            optimisticSingleSelect.optionValue === optionValue;
           const isSelected =
             isOptimisticallySelected ||
-            (!customAnswerActive && progress.selectedOptionLabels.includes(option.label));
+            (!customAnswerActive && progress.selectedOptionLabels.includes(optionValue));
           const shortcutKey = index < 9 ? index + 1 : null;
           const className = cn(
             "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-all duration-150 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25",
@@ -209,11 +286,11 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           );
           return (
             <button
-              key={`${activeQuestion.id}:${option.label}`}
+              key={`${activeQuestion.id}:${optionValue}`}
               type="button"
               disabled={isResponding}
               onClick={() => {
-                handleOptionSelection(activeQuestion.id, option.label);
+                handleOptionSelection(activeQuestion.id, optionValue);
               }}
               className={className}
             >
@@ -222,6 +299,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           );
         })}
       </div>
+      {actionButtons}
     </div>
   );
 });

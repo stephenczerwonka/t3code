@@ -5,7 +5,12 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
-import type { ToolLifecycleItemType } from "@t3tools/contracts";
+import type {
+  RuntimeContentStreamKind,
+  ServerProviderSlashCommand,
+  ThreadTokenUsageSnapshot,
+  ToolLifecycleItemType,
+} from "@t3tools/contracts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -88,10 +93,12 @@ export type AcpParsedSessionEvent =
   | {
       readonly _tag: "AssistantItemStarted";
       readonly itemId: string;
+      readonly streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
     }
   | {
       readonly _tag: "AssistantItemCompleted";
       readonly itemId: string;
+      readonly streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
     }
   | {
       readonly _tag: "PlanUpdated";
@@ -104,8 +111,23 @@ export type AcpParsedSessionEvent =
       readonly rawPayload: unknown;
     }
   | {
+      readonly _tag: "UsageUpdated";
+      readonly usage: EffectAcpSchema.UsageUpdate;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly commands: ReadonlyArray<ServerProviderSlashCommand>;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ConfigOptionsUpdated";
+      readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+    }
+  | {
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
+      readonly streamKind: Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
       readonly text: string;
       readonly rawPayload: unknown;
     };
@@ -119,6 +141,93 @@ type AcpToolCallUpdate = Extract<
   EffectAcpSchema.SessionNotification["update"],
   { readonly sessionUpdate: "tool_call" | "tool_call_update" }
 >;
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function normalizeAcpUsageUpdate(
+  usage: EffectAcpSchema.UsageUpdate,
+  previous?: ThreadTokenUsageSnapshot,
+): ThreadTokenUsageSnapshot | undefined {
+  const usedTokens = nonNegativeInteger(usage.used);
+  const maxTokens = nonNegativeInteger(usage.size);
+  if (usedTokens === undefined || maxTokens === undefined || usedTokens > maxTokens) {
+    return undefined;
+  }
+  return {
+    ...previous,
+    usedTokens,
+    ...(maxTokens > 0 ? { maxTokens } : { maxTokens: undefined }),
+  };
+}
+
+export function normalizeAcpPromptUsage(
+  usage: EffectAcpSchema.Usage,
+  previous?: ThreadTokenUsageSnapshot,
+): ThreadTokenUsageSnapshot | undefined {
+  const totalProcessedTokens = nonNegativeInteger(usage.totalTokens);
+  const inputTokens = nonNegativeInteger(usage.inputTokens);
+  const outputTokens = nonNegativeInteger(usage.outputTokens);
+  if (
+    totalProcessedTokens === undefined ||
+    inputTokens === undefined ||
+    outputTokens === undefined
+  ) {
+    return undefined;
+  }
+  const cachedInputTokens = nonNegativeInteger(usage.cachedReadTokens);
+  const reasoningOutputTokens = nonNegativeInteger(usage.thoughtTokens);
+  return {
+    ...previous,
+    usedTokens: previous?.usedTokens ?? totalProcessedTokens,
+    totalProcessedTokens: Math.max(totalProcessedTokens, previous?.totalProcessedTokens ?? 0),
+    inputTokens: Math.max(inputTokens, previous?.inputTokens ?? 0),
+    outputTokens: Math.max(outputTokens, previous?.outputTokens ?? 0),
+    ...(cachedInputTokens !== undefined
+      ? { cachedInputTokens: Math.max(cachedInputTokens, previous?.cachedInputTokens ?? 0) }
+      : {}),
+    ...(reasoningOutputTokens !== undefined
+      ? {
+          reasoningOutputTokens: Math.max(
+            reasoningOutputTokens,
+            previous?.reasoningOutputTokens ?? 0,
+          ),
+        }
+      : {}),
+  };
+}
+
+export function acpTokenUsageEqual(
+  left: ThreadTokenUsageSnapshot | undefined,
+  right: ThreadTokenUsageSnapshot | undefined,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function normalizeAcpAvailableCommands(
+  commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const commandsByName = new Map<string, ServerProviderSlashCommand>();
+  for (const command of commands) {
+    const name = command.name.trim().replace(/^\/+/, "");
+    if (!name) continue;
+    const description = command.description.trim() || undefined;
+    const hint = command.input?.hint.trim() || undefined;
+    const key = name.toLowerCase();
+    const existing = commandsByName.get(key);
+    commandsByName.set(key, {
+      name: existing?.name ?? name,
+      ...((existing?.description ?? description)
+        ? { description: existing?.description ?? description }
+        : {}),
+      ...((existing?.input?.hint ?? hint)
+        ? { input: { hint: existing?.input?.hint ?? hint! } }
+        : {}),
+    });
+  }
+  return [...commandsByName.values()];
+}
 
 export function extractModelConfigId(sessionResponse: AcpSessionSetupResponse): string | undefined {
   const configOptions = sessionResponse.configOptions;
@@ -564,10 +673,45 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       }
       break;
     }
+    case "usage_update": {
+      events.push({
+        _tag: "UsageUpdated",
+        usage: upd,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "available_commands_update": {
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        commands: normalizeAcpAvailableCommands(upd.availableCommands),
+        rawPayload: params,
+      });
+      break;
+    }
+    case "config_option_update": {
+      events.push({
+        _tag: "ConfigOptionsUpdated",
+        configOptions: upd.configOptions,
+      });
+      break;
+    }
     case "agent_message_chunk": {
       if (upd.content.type === "text" && upd.content.text.length > 0) {
         events.push({
           _tag: "ContentDelta",
+          streamKind: "assistant_text",
+          text: upd.content.text,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ContentDelta",
+          streamKind: "reasoning_text",
           text: upd.content.text,
           rawPayload: params,
         });

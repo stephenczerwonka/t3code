@@ -444,6 +444,7 @@ export type RequestResolvedPayload = typeof RequestResolvedPayload.Type;
 const UserInputQuestionOption = Schema.Struct({
   label: TrimmedNonEmptyStringSchema,
   description: TrimmedNonEmptyStringSchema,
+  value: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type UserInputQuestionOption = typeof UserInputQuestionOption.Type;
 
@@ -455,15 +456,23 @@ export const UserInputQuestion = Schema.Struct({
   multiSelect: Schema.optional(Schema.Boolean).pipe(
     Schema.withConstructorDefault(Effect.succeed(false)),
   ),
+  required: Schema.optional(Schema.Boolean),
 });
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 
+export const ProviderUserInputAction = Schema.Literals(["accept", "decline", "cancel"]);
+export type ProviderUserInputAction = typeof ProviderUserInputAction.Type;
+
 const UserInputRequestedPayload = Schema.Struct({
+  message: Schema.optional(TrimmedNonEmptyStringSchema),
   questions: Schema.Array(UserInputQuestion),
+  responseActions: Schema.optional(Schema.Array(ProviderUserInputAction)),
+  requiresReview: Schema.optional(Schema.Boolean),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
+  action: Schema.optional(ProviderUserInputAction),
   answers: UnknownRecordSchema,
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
